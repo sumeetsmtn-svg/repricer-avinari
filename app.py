@@ -163,11 +163,14 @@ def bsale_cargar_productos_directo(limite_escaneo: int, true_list_id: int) -> li
     base_url = "https://api.bsale.io/v1"
     productos = []
     offset, limite_pagina = 0, 50
+    offset_maximo = 20000  # tope de seguridad para no escanear infinitamente en catálogos muy grandes
 
-    while offset < limite_escaneo:
-        limit_solicitado = min(limite_pagina, limite_escaneo - offset)
+    # "limite_escaneo" es la cantidad de productos VÁLIDOS que queremos analizar, no la
+    # cantidad de registros de stock a revisar (muchos se descartan por stock 0 o SKU
+    # inválido), así que seguimos paginando hasta juntar esa cantidad o agotar el catálogo.
+    while len(productos) < limite_escaneo and offset < offset_maximo:
         try:
-            r = BSALE_SESSION.get(f"{base_url}/stocks.json", headers=headers, params={"state": 1, "limit": limit_solicitado, "offset": offset}, timeout=20)
+            r = BSALE_SESSION.get(f"{base_url}/stocks.json", headers=headers, params={"state": 1, "limit": limite_pagina, "offset": offset}, timeout=20)
             items = r.json().get("items", [])
             if not items: break
 
@@ -177,7 +180,7 @@ def bsale_cargar_productos_directo(limite_escaneo: int, true_list_id: int) -> li
         except Exception:
             break
         offset += limite_pagina
-    return productos
+    return productos[:limite_escaneo]
 
 def _cargar_un_sku(sku: str, true_list_id: int):
     headers = {"access_token": TOKEN_BSALE, "Content-Type": "application/json"}
@@ -277,25 +280,30 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
                         stats["bajadas"] += 1
 
         margen_actual_display = calcular_margen_display(precio_ml if ctx and ctx.get("en_catalogo") else p.precio_actual, p.costo)
-        margen_nuevo_display = calcular_margen_display(target, p.costo) if target else "-"
+
+        # Cuando no hay una sugerencia automática (Mantener / Bloqueado / sin vinculación),
+        # "Precio Final" se precarga con el precio actual de Bsale para que siempre quede
+        # editable (nunca en None) y el usuario pueda sobreescribirlo manualmente si quiere.
+        precio_final_editable = target if target is not None else round(p.precio_actual, 2)
+        margen_nuevo_display = calcular_margen_display(precio_final_editable, p.costo)
 
         resultados.append({
-            "Aprobar": False, 
-            "SKU": p.sku, 
-            "Producto": p.nombre, 
+            "Aprobar": False,
+            "SKU": p.sku,
+            "Producto": p.nombre,
             "Enlace ML": url_dinamica,
-            "Stock": p.stock, 
-            "Precio Bsale": precio_bsale_display, 
-            "Precio ML": precio_ml_display, 
-            "Margen Actual": margen_actual_display, 
+            "Stock": p.stock,
+            "Precio Bsale": precio_bsale_display,
+            "Precio ML": precio_ml_display,
+            "Margen Actual": margen_actual_display,
             "Rival Más Barato": precio_rival_display,
             "Vendedor Rival": rival_nombre_display,
             "Acción": accion,
-            "Precio Sugerido": nuevo_precio_display, 
-            "Precio Final": target,                  # Editable
+            "Precio Sugerido": nuevo_precio_display,
+            "Precio Final": precio_final_editable,    # Editable
             "Margen Nuevo": margen_nuevo_display,    # Se recalcula al editar
-            "Detalle": motivo, 
-            "_target_original": target,              
+            "Detalle": motivo,
+            "_target_original": precio_final_editable,
             "_variant_id": p.variant_id,
             "_costo": p.costo                        # Oculto, usado para recalcular margen
         })
