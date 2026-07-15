@@ -4,12 +4,44 @@ import time
 import requests
 import urllib.parse
 import re
+import os
+import concurrent.futures
+import bcrypt
 from dataclasses import dataclass
 
 from repricer import (
     ML_APP_ID, ML_SECRET_KEY, BSALE_TOKEN, DIFERENCIAL_PRECIO, PAUSA_ML
 )
 from ml_sku_resolver import MLSkuResolver, obtener_contexto_buy_box
+
+APP_USERNAME = os.environ["APP_USERNAME"]
+APP_PASSWORD_HASH = os.environ["APP_PASSWORD_HASH"]
+
+def verificar_login():
+    if st.session_state.get("autenticado"):
+        return True
+
+    st.set_page_config(page_title="Repricer by Avinari.cl", page_icon="🏢", layout="centered")
+    st.markdown("<h2 style='text-align: center;'>🏢 Repricer by Avinari.cl</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #888;'>Acceso restringido</p>", unsafe_allow_html=True)
+
+    with st.form("login_form"):
+        usuario = st.text_input("Usuario")
+        clave = st.text_input("Contraseña", type="password")
+        enviado = st.form_submit_button("Ingresar", type="primary", width="stretch")
+
+    if enviado:
+        clave_valida = bcrypt.checkpw(clave.encode("utf-8"), APP_PASSWORD_HASH.encode("utf-8"))
+        if usuario == APP_USERNAME and clave_valida:
+            st.session_state.autenticado = True
+            st.rerun()
+        else:
+            st.error("Usuario o contraseña incorrectos.")
+
+    return False
+
+if not verificar_login():
+    st.stop()
 
 if "resultados_escaneo" not in st.session_state:
     st.session_state.resultados_escaneo = None
@@ -19,6 +51,10 @@ if "stats_actuales" not in st.session_state:
     st.session_state.stats_actuales = {"analizados": 0, "subidas": 0, "bajadas": 0, "protegidos": 0}
 
 TOKEN_BSALE = BSALE_TOKEN
+
+# Sesión HTTP reutilizable: evita rehacer el handshake TLS en cada llamada a Bsale
+BSALE_SESSION = requests.Session()
+BSALE_SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20))
 
 @dataclass
 class AppProducto:
@@ -44,7 +80,7 @@ def calcular_margen_display(precio_venta: float, costo_base: float) -> str:
 def obtener_id_lista_ml():
     headers = {"access_token": TOKEN_BSALE, "Content-Type": "application/json"}
     try:
-        r = requests.get("https://api.bsale.io/v1/price_lists.json", headers=headers, timeout=15)
+        r = BSALE_SESSION.get("https://api.bsale.io/v1/price_lists.json", headers=headers, timeout=15)
         if r.ok:
             listas = r.json().get("items", [])
             for lista in listas:
@@ -61,19 +97,19 @@ def bsale_actualizar_precio_lista_jit(variant_id: int, nuevo_precio_bruto: float
     
     try:
         url_search = f"{base_url}/price_lists/{true_list_id}/details.json"
-        resp_search = requests.get(url_search, headers=headers, params={"variantid": variant_id}, timeout=15)
+        resp_search = BSALE_SESSION.get(url_search, headers=headers, params={"variantid": variant_id}, timeout=15)
         resp_search.raise_for_status()
-        
+
         items = resp_search.json().get("items", [])
         if not items: return f"Variante no encontrada en la Lista (ID {true_list_id})"
-            
+
         detail_id = int(items[0]["id"])
         precio_neto_api = float(nuevo_precio_bruto) / 1.19
-        
+
         url_put = f"{base_url}/price_lists/{true_list_id}/details/{detail_id}.json"
         payload = {"id": detail_id, "variantValue": precio_neto_api}
-        
-        resp_put = requests.put(url_put, headers=headers, json=payload, timeout=15)
+
+        resp_put = BSALE_SESSION.put(url_put, headers=headers, json=payload, timeout=15)
         if not resp_put.ok:
             return f"Error HTTP {resp_put.status_code} | Bsale: {resp_put.text}"
             
@@ -88,87 +124,97 @@ def obtener_meta_minima(costo: float) -> float:
     if p_min >= 19990: p_min = (meta_bruta + 3100) / 0.86
     return p_min
 
+def _procesar_stock_item(s: dict, true_list_id: int):
+    headers = {"access_token": TOKEN_BSALE, "Content-Type": "application/json"}
+    base_url = "https://api.bsale.io/v1"
+
+    stock_qty = float(s.get("quantity") or 0)
+    if stock_qty <= 0: return None
+    href = (s.get("variant") or {}).get("href", "")
+    if not href: return None
+    vid = int(href.rstrip("/").replace(".json", "").split("/")[-1])
+
+    try:
+        data = BSALE_SESSION.get(f"{base_url}/variants/{vid}.json", headers=headers, timeout=15).json()
+        sku = (data.get("code") or "").strip()
+        if not sku: return None
+
+        nombre = (data.get("description") or "").strip()
+        if nombre in [".", ""]:
+            p_data = BSALE_SESSION.get(f"{base_url}/products/{data['product']['id']}.json", headers=headers, timeout=15).json()
+            nombre = (p_data.get("name") or "").strip()
+
+        cost_data = BSALE_SESSION.get(f"{base_url}/variants/{vid}/costs.json", headers=headers, timeout=15).json()
+        costo = float(cost_data.get("averageCost") or cost_data.get("totalCost") or 1.0) if cost_data else 1.0
+
+        pl_data = BSALE_SESSION.get(f"{base_url}/price_lists/{true_list_id}/details.json", headers=headers, params={"variantid": vid}, timeout=15).json()
+        precio_actual_bsale = 0.0
+        if pl_data.get("items"):
+            det = pl_data["items"][0]
+            precio_actual_bsale = float(det.get("variantValueWithTaxes") or det.get("variantValue") or 0)
+
+        p_min = obtener_meta_minima(costo)
+        return AppProducto(vid, sku, nombre, precio_actual_bsale, costo, int(stock_qty), p_min)
+    except Exception:
+        return None
+
 def bsale_cargar_productos_directo(limite_escaneo: int, true_list_id: int) -> list[AppProducto]:
     headers = {"access_token": TOKEN_BSALE, "Content-Type": "application/json"}
     base_url = "https://api.bsale.io/v1"
     productos = []
-    offset, limite_pagina = 0, 50 
-    
+    offset, limite_pagina = 0, 50
+
     while offset < limite_escaneo:
         limit_solicitado = min(limite_pagina, limite_escaneo - offset)
         try:
-            r = requests.get(f"{base_url}/stocks.json", headers=headers, params={"state": 1, "limit": limit_solicitado, "offset": offset}, timeout=20)
+            r = BSALE_SESSION.get(f"{base_url}/stocks.json", headers=headers, params={"state": 1, "limit": limit_solicitado, "offset": offset}, timeout=20)
             items = r.json().get("items", [])
-            if not items: break  
-                
-            for s in items:
-                stock_qty = float(s.get("quantity") or 0)
-                if stock_qty <= 0: continue
-                href = (s.get("variant") or {}).get("href", "")
-                if not href: continue
-                vid = int(href.rstrip("/").replace(".json", "").split("/")[-1])
-                
-                try:
-                    data = requests.get(f"{base_url}/variants/{vid}.json", headers=headers, timeout=15).json()
-                    sku = (data.get("code") or "").strip()
-                    if not sku: continue
-                    
-                    nombre = (data.get("description") or "").strip()
-                    if nombre in [".", ""]:
-                        p_data = requests.get(f"{base_url}/products/{data['product']['id']}.json", headers=headers, timeout=15).json()
-                        nombre = (p_data.get("name") or "").strip()
-                        
-                    cost_data = requests.get(f"{base_url}/variants/{vid}/costs.json", headers=headers, timeout=15).json()
-                    costo = float(cost_data.get("averageCost") or cost_data.get("totalCost") or 1.0) if cost_data else 1.0
-                    
-                    pl_data = requests.get(f"{base_url}/price_lists/{true_list_id}/details.json", headers=headers, params={"variantid": vid}, timeout=15).json()
-                    precio_actual_bsale = 0.0
-                    
-                    if pl_data.get("items"): 
-                        det = pl_data["items"][0]
-                        precio_actual_bsale = float(det.get("variantValueWithTaxes") or det.get("variantValue") or 0)
-                    
-                    p_min = obtener_meta_minima(costo)
-                    productos.append(AppProducto(vid, sku, nombre, precio_actual_bsale, costo, int(stock_qty), p_min))
-                except: continue
-        except: break
+            if not items: break
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                resultados_pagina = executor.map(lambda s: _procesar_stock_item(s, true_list_id), items)
+                productos.extend(p for p in resultados_pagina if p is not None)
+        except Exception:
+            break
         offset += limite_pagina
     return productos
 
-def bsale_cargar_productos_por_sku(lista_skus: list, true_list_id: int) -> list[AppProducto]:
+def _cargar_un_sku(sku: str, true_list_id: int):
     headers = {"access_token": TOKEN_BSALE, "Content-Type": "application/json"}
     base_url = "https://api.bsale.io/v1"
-    productos = []
-    
-    for sku in lista_skus:
-        try:
-            r_var = requests.get(f"{base_url}/variants.json", headers=headers, params={"code": sku}, timeout=15)
-            if not r_var.ok or not r_var.json().get("items"): continue
-            vid = r_var.json()["items"][0]["id"]
-            
-            data = requests.get(f"{base_url}/variants/{vid}.json", headers=headers, timeout=15).json()
-            nombre = (data.get("description") or "").strip()
-            if nombre in [".", ""]:
-                p_data = requests.get(f"{base_url}/products/{data['product']['id']}.json", headers=headers, timeout=15).json()
-                nombre = (p_data.get("name") or "").strip()
-                    
-            r_stock = requests.get(f"{base_url}/stocks.json", headers=headers, params={"variantid": vid}, timeout=15)
-            stock_qty = sum(float(s.get("quantity") or 0) for s in r_stock.json().get("items", []))
-            
-            cost_data = requests.get(f"{base_url}/variants/{vid}/costs.json", headers=headers, timeout=15).json()
-            costo = float(cost_data.get("averageCost") or cost_data.get("totalCost") or 1.0) if cost_data else 1.0
-            
-            pl_data = requests.get(f"{base_url}/price_lists/{true_list_id}/details.json", headers=headers, params={"variantid": vid}, timeout=15).json()
-            precio_actual_bsale = 0.0
-            
-            if pl_data.get("items"): 
-                det = pl_data["items"][0]
-                precio_actual_bsale = float(det.get("variantValueWithTaxes") or det.get("variantValue") or 0)
-            
-            p_min = obtener_meta_minima(costo)
-            productos.append(AppProducto(vid, sku, nombre, precio_actual_bsale, costo, int(stock_qty), p_min))
-        except: continue
-    return productos
+
+    try:
+        r_var = BSALE_SESSION.get(f"{base_url}/variants.json", headers=headers, params={"code": sku}, timeout=15)
+        if not r_var.ok or not r_var.json().get("items"): return None
+        vid = r_var.json()["items"][0]["id"]
+
+        data = BSALE_SESSION.get(f"{base_url}/variants/{vid}.json", headers=headers, timeout=15).json()
+        nombre = (data.get("description") or "").strip()
+        if nombre in [".", ""]:
+            p_data = BSALE_SESSION.get(f"{base_url}/products/{data['product']['id']}.json", headers=headers, timeout=15).json()
+            nombre = (p_data.get("name") or "").strip()
+
+        r_stock = BSALE_SESSION.get(f"{base_url}/stocks.json", headers=headers, params={"variantid": vid}, timeout=15)
+        stock_qty = sum(float(s.get("quantity") or 0) for s in r_stock.json().get("items", []))
+
+        cost_data = BSALE_SESSION.get(f"{base_url}/variants/{vid}/costs.json", headers=headers, timeout=15).json()
+        costo = float(cost_data.get("averageCost") or cost_data.get("totalCost") or 1.0) if cost_data else 1.0
+
+        pl_data = BSALE_SESSION.get(f"{base_url}/price_lists/{true_list_id}/details.json", headers=headers, params={"variantid": vid}, timeout=15).json()
+        precio_actual_bsale = 0.0
+        if pl_data.get("items"):
+            det = pl_data["items"][0]
+            precio_actual_bsale = float(det.get("variantValueWithTaxes") or det.get("variantValue") or 0)
+
+        p_min = obtener_meta_minima(costo)
+        return AppProducto(vid, sku, nombre, precio_actual_bsale, costo, int(stock_qty), p_min)
+    except Exception:
+        return None
+
+def bsale_cargar_productos_por_sku(lista_skus: list, true_list_id: int) -> list[AppProducto]:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        resultados = executor.map(lambda sku: _cargar_un_sku(sku, true_list_id), lista_skus)
+        return [p for p in resultados if p is not None]
 
 def ejecutar_analisis_mercado(productos, progress_bar, status_text):
     stats = {"analizados": 0, "subidas": 0, "bajadas": 0, "protegidos": 0}
@@ -183,6 +229,7 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
         
         accion, motivo, target = "⚪ Ignorado", "Sin vinculación", None
         precio_rival_display = "N/A"
+        rival_nombre_display = "-"
         
         precio_bsale_display = f"${p.precio_actual:,.0f}"
         
@@ -207,8 +254,9 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
                 accion, motivo = "🟢 Liderando", "Eres el más barato"
             else:
                 precio_rival_display = f"${precio_rival:,.0f}"
+                rival_nombre_display = ctx.get("rival_nombre") or "Desconocido"
                 target = round(precio_rival - DIFERENCIAL_PRECIO, 2)
-                
+
                 # REGLA FUEGO AMIGO
                 if abs(precio_ml - precio_rival) <= 10:
                     accion, motivo = "⚪ Mantener", "Empate / Eres el más barato"
@@ -240,8 +288,9 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
             "Precio Bsale": precio_bsale_display, 
             "Precio ML": precio_ml_display, 
             "Margen Actual": margen_actual_display, 
-            "Rival Más Barato": precio_rival_display, 
-            "Acción": accion, 
+            "Rival Más Barato": precio_rival_display,
+            "Vendedor Rival": rival_nombre_display,
+            "Acción": accion,
             "Precio Sugerido": nuevo_precio_display, 
             "Precio Final": target,                  # Editable
             "Margen Nuevo": margen_nuevo_display,    # Se recalcula al editar
@@ -279,9 +328,13 @@ TRUE_LIST_ID = obtener_id_lista_ml()
 with st.sidebar:
     try:
         col_sb1, col_sb2, col_sb3 = st.columns([1, 4, 1])
-        with col_sb2: st.image("logo.png", use_container_width=True)
+        with col_sb2: st.image("logo.png", width="stretch")
     except: pass
-    
+
+    if st.button("🔒 Cerrar sesión", width="stretch"):
+        st.session_state.autenticado = False
+        st.rerun()
+
     st.markdown(f"<p style='text-align: center; color: #888; font-size: 0.8rem; margin-top: -10px; margin-bottom: 20px; font-weight: 500;'>Control Center | v19.1 (Dynamic Margin)<br>Target: Lista Bsale ID {TRUE_LIST_ID}</p>", unsafe_allow_html=True)
     st.divider()
     
@@ -290,10 +343,11 @@ with st.sidebar:
     
     st.divider()
     st.header("Filtros de Acción")
+    opciones_accion = ["🟢 SUBIR PRECIO", "🔴 BAJAR PRECIO", "🔴 Bloqueado (Piso)", "🟢 Liderando", "⚪ Mantener", "⚪ Ignorado"]
     filtros_accion = st.multiselect(
         "Estados activos:",
-        options=["🟢 SUBIR PRECIO", "🔴 BAJAR PRECIO", "🔴 Bloqueado (Piso)", "🟢 Liderando", "⚪ Mantener", "⚪ Ignorado"],
-        default=["🟢 SUBIR PRECIO", "🔴 BAJAR PRECIO"]
+        options=opciones_accion,
+        default=opciones_accion
     )
     
     st.markdown("<br><br>" * 2, unsafe_allow_html=True)
@@ -324,7 +378,7 @@ tab1, tab2 = st.tabs(["Ingreso por Lote de SKUs", "Barrido General de Catálogo"
 
 with tab1:
     skus_input = st.text_area("SKUs (Separados por espacio o salto de línea)", height=150)
-    if st.button("1. Ejecutar Análisis de SKUs", type="primary", use_container_width=True):
+    if st.button("1. Ejecutar Análisis de SKUs", type="primary", width="stretch"):
         if not skus_input.strip(): st.warning("Ingrese al menos un SKU para continuar.")
         else:
             lista_cruda = re.split(r'[,\n\t\s]+', skus_input)
@@ -344,7 +398,7 @@ with tab1:
                 st.session_state.stats_actuales = sts
 
 with tab2:
-    if st.button("1. Iniciar Barrido General", type="primary", use_container_width=True):
+    if st.button("1. Iniciar Barrido General", type="primary", width="stretch"):
         with st.spinner("Validando credenciales con API Mercado Libre..."):
             r = requests.post("https://api.mercadolibre.com/oauth/token", data={"grant_type": "client_credentials", "client_id": ML_APP_ID, "client_secret": ML_SECRET_KEY}, timeout=15)
             st.session_state.token_ml = r.json().get("access_token")
@@ -365,11 +419,14 @@ if st.session_state.resultados_escaneo is not None:
     df = pd.DataFrame(st.session_state.resultados_escaneo)
     df_mostrar = df[df["Acción"].isin(filtros_accion)] if filtros_accion else df
 
+    if len(df_mostrar) < len(df):
+        st.caption(f"Mostrando {len(df_mostrar)} de {len(df)} SKUs analizados (hay {len(df) - len(df_mostrar)} ocultos por el filtro 'Estados activos' de la barra lateral).")
+
     edited_df = st.data_editor(
         df_mostrar,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
-        disabled=["SKU", "Producto", "Enlace ML", "Stock", "Precio Bsale", "Precio ML", "Margen Actual", "Rival Más Barato", "Acción", "Precio Sugerido", "Margen Nuevo", "Detalle"],
+        disabled=["SKU", "Producto", "Enlace ML", "Stock", "Precio Bsale", "Precio ML", "Margen Actual", "Rival Más Barato", "Vendedor Rival", "Acción", "Precio Sugerido", "Margen Nuevo", "Detalle"],
         column_config={
             "Aprobar": st.column_config.CheckboxColumn("Aprobar", default=False),
             "Enlace ML": st.column_config.LinkColumn("Enlace ML", display_text="Revisar Publicación"),
@@ -405,11 +462,10 @@ if st.session_state.resultados_escaneo is not None:
             cambios_para_rerun = True
 
     if cambios_para_rerun:
-        try: st.rerun()
-        except: st.experimental_rerun()
+        st.rerun()
     # ----------------------------------
 
-    if st.button("2. Aplicar Cambios en Bsale", type="primary", use_container_width=True):
+    if st.button("2. Aplicar Cambios en Bsale", type="primary", width="stretch"):
         productos_aprobados = edited_df[edited_df["Aprobar"] == True]
         
         if productos_aprobados.empty: 
@@ -456,7 +512,7 @@ if st.session_state.resultados_escaneo is not None:
                         st.info("Utilice este reporte para orientar las campañas de Mercado Ads a los SKUs donde acaba de ganar la Buy Box.")
                         
                         df_log = pd.DataFrame(log_cambios_exitosos)
-                        st.dataframe(df_log, use_container_width=True, hide_index=True)
+                        st.dataframe(df_log, width="stretch", hide_index=True)
                         
                         csv_log = df_log.to_csv(index=False).encode('utf-8')
                         st.download_button(

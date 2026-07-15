@@ -245,11 +245,14 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
         precio_buy_box = buy_box_winner.get("price")
         ganando = (winner_id == item_id)
 
+    winner_seller_id = None
+
     # 🌞 PLAN B: Paginación profunda en el catálogo oficial
     if not precio_buy_box:
         try:
             mejor_precio = float('inf')
             mejor_item_id = None
+            mejor_seller_id = None
             offset = 0
 
             while offset < 500:
@@ -272,6 +275,7 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
                         if comp_price_float < mejor_precio:
                             mejor_precio = comp_price_float
                             mejor_item_id = comp_item_id
+                            mejor_seller_id = comp.get("seller_id")
 
                 offset += 50
                 if len(lista_competidores) < 50:
@@ -280,9 +284,44 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
             if mejor_precio != float('inf'):
                 precio_buy_box = mejor_precio
                 winner_id = mejor_item_id
+                winner_seller_id = mejor_seller_id
 
         except Exception as e:
             pass
+
+    # Nota: /items/{id} de un item ajeno devuelve 403 (access_denied) con un token de
+    # app (client_credentials). Por eso el seller_id del rival se saca del catálogo
+    # público /products/{id}/items (arriba), nunca del item directamente.
+    rival_nombre = None
+    if winner_id and not ganando:
+        try:
+            seller_id_rival = winner_seller_id
+            if not seller_id_rival:
+                offset = 0
+                while offset < 500 and not seller_id_rival:
+                    items_cat = resolver._get(
+                        f"https://api.mercadolibre.com/products/{catalog_product_id}/items",
+                        params={"status": "active", "limit": 50, "offset": offset}
+                    )
+                    lista_competidores = items_cat.get("results") or items_cat.get("items_with_buy_box") or []
+                    if not lista_competidores:
+                        break
+                    for comp in lista_competidores:
+                        if (comp.get("item_id") or comp.get("id")) == winner_id:
+                            seller_id_rival = comp.get("seller_id")
+                            break
+                    offset += 50
+                    if len(lista_competidores) < 50:
+                        break
+
+            if seller_id_rival:
+                seller_data = resolver._get(
+                    f"https://api.mercadolibre.com/users/{seller_id_rival}",
+                    params={"attributes": "nickname"},
+                )
+                rival_nombre = seller_data.get("nickname")
+        except Exception:
+            rival_nombre = None
 
     return {
         "item_id": item_id,
@@ -291,5 +330,6 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
         "precio_propio": precio_propio,
         "precio_buy_box": precio_buy_box,
         "ganando_buy_box": ganando,
-        "buy_box_winner_id": winner_id
+        "buy_box_winner_id": winner_id,
+        "rival_nombre": rival_nombre,
     }
