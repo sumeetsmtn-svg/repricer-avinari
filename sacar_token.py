@@ -7,7 +7,7 @@ load_dotenv()
 # 1. LLENA ESTOS DATOS (APP_ID y SECRET vienen del .env; CODE cambia cada vez)
 APP_ID = os.environ["ML_APP_ID"]
 SECRET = os.environ["ML_SECRET_KEY"]
-CODE = "TG-6a29e9b50ff4ee0001394eca-1086302003"
+CODE = "pega_aqui_el_codigo_de_un_solo_uso"
 
 # 2. EL CANJE
 url = "https://api.mercadolibre.com/oauth/token"
