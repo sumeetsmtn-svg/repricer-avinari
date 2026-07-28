@@ -385,26 +385,29 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
             items = []
 
         precios = [float(it["price"]) for it in items if it.get("price")]
-        if not precios:
-            continue
-
         n_vendedores = len(items)
-        precio_min, precio_max = min(precios), max(precios)
-        precio_prom = sum(precios) / len(precios)
-        rango = "Alta demanda 🌟" if n_vendedores >= 8 else "Normal"
+        precio_min = min(precios) if precios else None
+        precio_max = max(precios) if precios else None
+        precio_prom = (sum(precios) / len(precios)) if precios else None
+
+        if n_vendedores == 0:
+            rango = "Sin competencia activa"
+        elif n_vendedores >= 8:
+            rango = "Alta demanda 🌟"
+        else:
+            rango = "Normal"
         nombre_codificado = urllib.parse.quote(nombre)
 
         resultados.append({
             "🏆 Rango": rango,
             "Producto": nombre,
-            "Precio Mínimo Mercado": f"${precio_min:,.0f}",
-            "Precio Promedio Mercado": f"${precio_prom:,.0f}",
-            "Precio Máximo Mercado": f"${precio_max:,.0f}",
+            "Precio Mínimo Mercado": f"${precio_min:,.0f}" if precio_min is not None else "-",
+            "Precio Promedio Mercado": f"${precio_prom:,.0f}" if precio_prom is not None else "-",
+            "Precio Máximo Mercado": f"${precio_max:,.0f}" if precio_max is not None else "-",
             "👥 Vendedores Compitiendo": n_vendedores,
             "Enlace Directo": f"https://listado.mercadolibre.cl/{nombre_codificado}",
         })
 
-    resultados.sort(key=lambda x: x["👥 Vendedores Compitiendo"], reverse=True)
     return resultados
 
 def buscar_categoria_ml(termino: str) -> dict | None:
@@ -420,7 +423,17 @@ def buscar_categoria_ml(termino: str) -> dict | None:
     except Exception:
         return None
 
-def obtener_mas_vendidos(category_id: str, limite: int = 15) -> list[dict]:
+def _atributo_coincide(atributos_producto: list, atributos_filtro: list) -> bool:
+    # Solo descarta el producto si tiene el atributo (ej. GENERO) y CONTRADICE
+    # el filtro. Si el producto no trae ese atributo, se deja pasar (mejor
+    # mostrar de más que ocultar por falta de dato).
+    for filtro in atributos_filtro or []:
+        valor_producto = next((a.get("value_name") for a in atributos_producto if a.get("id") == filtro.get("id")), None)
+        if valor_producto and valor_producto != filtro.get("value_name"):
+            return False
+    return True
+
+def obtener_mas_vendidos(category_id: str, atributos_filtro: list = None, limite: int = 15) -> list[dict]:
     headers = {"Authorization": f"Bearer {st.session_state.token_ml}"}
     try:
         r = requests.get(
@@ -433,7 +446,10 @@ def obtener_mas_vendidos(category_id: str, limite: int = 15) -> list[dict]:
         return []
 
     resultados = []
-    for entrada in contenido[:limite]:
+    for entrada in contenido:
+        if len(resultados) >= limite:
+            break
+
         catalog_product_id = entrada.get("id")
         posicion = entrada.get("position")
         if not catalog_product_id:
@@ -441,9 +457,15 @@ def obtener_mas_vendidos(category_id: str, limite: int = 15) -> list[dict]:
 
         try:
             r_prod = requests.get(f"https://api.mercadolibre.com/products/{catalog_product_id}", headers=headers, timeout=15)
-            nombre = r_prod.json().get("name") or "-"
+            prod_data = r_prod.json()
+            nombre = prod_data.get("name") or "-"
+            atributos_producto = prod_data.get("attributes", [])
         except Exception:
             nombre = "-"
+            atributos_producto = []
+
+        if not _atributo_coincide(atributos_producto, atributos_filtro):
+            continue
 
         try:
             r_items = requests.get(
@@ -651,7 +673,7 @@ with tab4:
                         categorias_no_encontradas.append(termino)
                         continue
                     nombre_categoria = categoria.get("category_name", categoria.get("category_id"))
-                    for fila in obtener_mas_vendidos(categoria["category_id"]):
+                    for fila in obtener_mas_vendidos(categoria["category_id"], categoria.get("attributes")):
                         fila["Categoría Buscada"] = nombre_categoria
                         ranking_total.append(fila)
 
