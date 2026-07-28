@@ -373,6 +373,67 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
     resultados.sort(key=lambda x: x["👥 Vendedores Compitiendo"], reverse=True)
     return resultados
 
+def buscar_categoria_ml(termino: str) -> dict | None:
+    headers = {"Authorization": f"Bearer {st.session_state.token_ml}"}
+    try:
+        r = requests.get(
+            "https://api.mercadolibre.com/sites/MLC/domain_discovery/search",
+            params={"q": termino}, headers=headers, timeout=15,
+        )
+        r.raise_for_status()
+        resultados = r.json()
+        return resultados[0] if resultados else None
+    except Exception:
+        return None
+
+def obtener_mas_vendidos(category_id: str, limite: int = 15) -> list[dict]:
+    headers = {"Authorization": f"Bearer {st.session_state.token_ml}"}
+    try:
+        r = requests.get(
+            f"https://api.mercadolibre.com/highlights/MLC/category/{category_id}",
+            headers=headers, timeout=15,
+        )
+        r.raise_for_status()
+        contenido = r.json().get("content", [])
+    except Exception:
+        return []
+
+    resultados = []
+    for entrada in contenido[:limite]:
+        catalog_product_id = entrada.get("id")
+        posicion = entrada.get("position")
+        if not catalog_product_id:
+            continue
+
+        try:
+            r_prod = requests.get(f"https://api.mercadolibre.com/products/{catalog_product_id}", headers=headers, timeout=15)
+            nombre = r_prod.json().get("name") or "-"
+        except Exception:
+            nombre = "-"
+
+        try:
+            r_items = requests.get(
+                f"https://api.mercadolibre.com/products/{catalog_product_id}/items",
+                params={"status": "active", "limit": 50},
+                headers=headers, timeout=15,
+            )
+            items = r_items.json().get("results", [])
+        except Exception:
+            items = []
+
+        precios = [float(it["price"]) for it in items if it.get("price")]
+        nombre_codificado = urllib.parse.quote(nombre)
+
+        resultados.append({
+            "🏅 Puesto": posicion,
+            "Producto": nombre,
+            "👥 Vendedores Activos": len(items),
+            "Precio Mínimo": f"${min(precios):,.0f}" if precios else "-",
+            "Precio Máximo": f"${max(precios):,.0f}" if precios else "-",
+            "Enlace Directo": f"https://listado.mercadolibre.cl/{nombre_codificado}",
+        })
+    return resultados
+
 st.set_page_config(page_title="Repricer by Avinari.cl", page_icon="🏢", layout="wide")
 
 col_logo, col_titulo = st.columns([1, 5])
@@ -436,7 +497,12 @@ m_protegidos.metric("Protección de Margen Mínimo", st.session_state.stats_actu
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["📋 Ingreso por Lote de SKUs", "🔍 Barrido General de Catálogo", "🔥 Inteligencia de Compras"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📋 Ingreso por Lote de SKUs",
+    "🔍 Barrido General de Catálogo",
+    "🔥 Inteligencia de Compras",
+    "📊 Historial y Tendencias",
+])
 
 with tab1:
     skus_input = st.text_area("SKUs (Separados por espacio o salto de línea)", height=150)
@@ -478,10 +544,7 @@ with tab3:
     st.markdown("### 🔥 Inteligencia de Compras")
     st.info(
         "Busca una marca o producto para ver cuántos vendedores están compitiendo por él "
-        "en el catálogo de Mercado Libre y en qué rango de precios se mueven. Nota: la API "
-        "de Mercado Libre no entrega reseñas ni calificaciones para este tipo de credencial, "
-        "así que se usa la cantidad de vendedores compitiendo como indicador de qué tan "
-        "movido está ese producto en el mercado."
+        "en el catálogo de Mercado Libre y en qué rango de precios se mueven."
     )
     termino_busqueda = st.text_input("Marca o producto a investigar", placeholder="Ej: Lattafa Asad")
 
@@ -509,6 +572,57 @@ with tab3:
                         "Enlace Directo": st.column_config.LinkColumn("Enlace Directo", display_text="🔍 Ver Producto Original"),
                     },
                 )
+
+with tab4:
+    st.markdown("### 📊 Historial y Tendencias")
+
+    st.markdown("#### 🔥 Más Vendidos por Categoría")
+    st.caption(
+        "Escribe una categoría o tipo de producto (ej: 'perfume hombre', 'notebook', "
+        "'zapatillas running') para ver el ranking oficial de más vendidos de Mercado "
+        "Libre en esa categoría, y detectar qué productos no tienes en tu catálogo."
+    )
+    termino_categoria = st.text_input("Categoría o tipo de producto", placeholder="Ej: perfume hombre", key="termino_tendencias")
+
+    if st.button("📈 Ver Más Vendidos", type="primary", width="stretch"):
+        if not termino_categoria.strip():
+            st.warning("Ingresa una categoría o tipo de producto.")
+        else:
+            if not st.session_state.token_ml:
+                with st.spinner("Validando credenciales con API Mercado Libre..."):
+                    r = requests.post("https://api.mercadolibre.com/oauth/token", data={"grant_type": "client_credentials", "client_id": ML_APP_ID, "client_secret": ML_SECRET_KEY}, timeout=15)
+                    st.session_state.token_ml = r.json().get("access_token")
+
+            with st.spinner(f"Buscando categoría para '{termino_categoria}'..."):
+                categoria = buscar_categoria_ml(termino_categoria.strip())
+
+            if not categoria:
+                st.warning("No se encontró una categoría de Mercado Libre para ese término. Prueba con otro nombre.")
+            else:
+                st.caption(f"Categoría detectada: **{categoria.get('category_name', categoria.get('category_id'))}**")
+                with st.spinner("Consultando ranking oficial de más vendidos..."):
+                    ranking = obtener_mas_vendidos(categoria["category_id"])
+
+                if not ranking:
+                    st.warning("Mercado Libre no entregó un ranking de más vendidos para esta categoría.")
+                else:
+                    df_ranking = pd.DataFrame(ranking)
+                    st.dataframe(
+                        df_ranking,
+                        hide_index=True,
+                        width="stretch",
+                        column_config={
+                            "Enlace Directo": st.column_config.LinkColumn("Enlace Directo", display_text="🔍 Ver Producto"),
+                        },
+                    )
+
+    st.divider()
+    st.markdown("#### 🕒 Historial de Precios y Márgenes")
+    st.info(
+        "Sección en preparación: cada escaneo se guardará automáticamente en una hoja de "
+        "cálculo de Google, para poder ver la evolución de precios y márgenes en el tiempo. "
+        "Falta completar la conexión con Google Sheets."
+    )
 
 if st.session_state.resultados_escaneo is not None:
     st.divider()
