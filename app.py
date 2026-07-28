@@ -5,9 +5,11 @@ import requests
 import urllib.parse
 import re
 import os
+import json
 import concurrent.futures
 import bcrypt
 from dataclasses import dataclass
+from datetime import datetime
 
 from repricer import (
     ML_APP_ID, ML_SECRET_KEY, BSALE_TOKEN, DIFERENCIAL_PRECIO, PAUSA_ML
@@ -16,6 +18,38 @@ from ml_sku_resolver import MLSkuResolver, obtener_contexto_buy_box
 
 APP_USERNAME = os.environ["APP_USERNAME"]
 APP_PASSWORD_HASH = os.environ["APP_PASSWORD_HASH"]
+
+HISTORIAL_HEADER = ["Fecha", "SKU", "Producto", "Precio Anterior", "Precio Nuevo", "Margen Nuevo", "Estrategia"]
+
+@st.cache_resource
+def obtener_hoja_historial():
+    creds_json = os.environ.get("GOOGLE_SHEETS_CREDS_JSON")
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")
+    if not creds_json or not sheet_id:
+        return None
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        creds_dict = json.loads(creds_json)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        gc = gspread.authorize(creds)
+        hoja = gc.open_by_key(sheet_id).sheet1
+        if not hoja.get("A1"):
+            hoja.update([HISTORIAL_HEADER], "A1")
+        return hoja
+    except Exception:
+        return None
+
+def guardar_historial_precios(filas: list[list]):
+    hoja = obtener_hoja_historial()
+    if not hoja or not filas:
+        return
+    try:
+        hoja.append_rows(filas, value_input_option="USER_ENTERED")
+    except Exception:
+        pass
 
 def verificar_login():
     if st.session_state.get("autenticado"):
@@ -618,11 +652,27 @@ with tab4:
 
     st.divider()
     st.markdown("#### 🕒 Historial de Precios y Márgenes")
-    st.info(
-        "Sección en preparación: cada escaneo se guardará automáticamente en una hoja de "
-        "cálculo de Google, para poder ver la evolución de precios y márgenes en el tiempo. "
-        "Falta completar la conexión con Google Sheets."
-    )
+    st.caption("Cada vez que aplicas cambios en Bsale desde el Repricer, queda un registro acá con fecha, precio anterior/nuevo y margen.")
+
+    hoja_historial = obtener_hoja_historial()
+    if not hoja_historial:
+        st.warning("El historial de Google Sheets no está configurado todavía (faltan las credenciales en Secrets).")
+    else:
+        if st.button("🔄 Cargar Historial", width="stretch"):
+            with st.spinner("Cargando historial desde Google Sheets..."):
+                registros = hoja_historial.get_all_records()
+
+            if not registros:
+                st.info("Aún no hay historial guardado. Aplica cambios en Bsale desde el Repricer para empezar a acumular datos.")
+            else:
+                df_historial = pd.DataFrame(registros)
+                st.dataframe(df_historial, hide_index=True, width="stretch")
+
+                skus_disponibles = sorted(df_historial["SKU"].astype(str).unique())
+                sku_elegido = st.selectbox("Ver evolución de un SKU específico", options=["(Todos)"] + skus_disponibles)
+                if sku_elegido != "(Todos)":
+                    df_sku = df_historial[df_historial["SKU"].astype(str) == sku_elegido]
+                    st.dataframe(df_sku, hide_index=True, width="stretch")
 
 if st.session_state.resultados_escaneo is not None:
     st.divider()
@@ -686,19 +736,20 @@ if st.session_state.resultados_escaneo is not None:
             with st.spinner("Sincronizando precios con Bsale..."):
                 exitos_bsale = 0
                 errores_bsale = []
-                log_cambios_exitosos = [] 
-                
+                log_cambios_exitosos = []
+                historial_para_sheets = []
+
                 for index, row in productos_aprobados.iterrows():
                     precio_final_inyectar = row["Precio Final"]
-                    
+
                     if pd.notna(precio_final_inyectar) and pd.notna(row["_variant_id"]):
                         estrategia = row["Acción"]
                         if pd.notna(row["_target_original"]) and float(precio_final_inyectar) != float(row["_target_original"]):
                             estrategia = "Modificación Manual ✍️"
 
                         resultado = bsale_actualizar_precio_lista_jit(int(row["_variant_id"]), float(precio_final_inyectar), TRUE_LIST_ID)
-                        
-                        if resultado == "OK": 
+
+                        if resultado == "OK":
                             exitos_bsale += 1
                             log_cambios_exitosos.append({
                                 "SKU": row["SKU"],
@@ -707,10 +758,18 @@ if st.session_state.resultados_escaneo is not None:
                                 "Precio Nuevo Inyectado": f"${precio_final_inyectar:,.0f}",
                                 "Estrategia Aplicada": estrategia
                             })
-                        else: 
+                            historial_para_sheets.append([
+                                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                row["SKU"], row["Producto"], row["Precio Bsale"],
+                                f"${precio_final_inyectar:,.0f}", row["Margen Nuevo"], estrategia,
+                            ])
+                        else:
                             errores_bsale.append(f"SKU {row['SKU']}: {resultado}")
-                        time.sleep(0.3) 
-                
+                        time.sleep(0.3)
+
+                if historial_para_sheets:
+                    guardar_historial_precios(historial_para_sheets)
+
                 if errores_bsale:
                     st.error("Se encontraron excepciones durante la sincronización:")
                     for err in errores_bsale: st.code(err)
