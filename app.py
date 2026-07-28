@@ -319,6 +319,60 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
     st.success("Análisis de mercado finalizado. Esperando revisión.")
     return resultados, stats
 
+def analizar_inteligencia_mercado(termino: str) -> list[dict]:
+    headers = {"Authorization": f"Bearer {st.session_state.token_ml}"}
+    resultados = []
+
+    try:
+        r = requests.get(
+            "https://api.mercadolibre.com/products/search",
+            params={"site_id": "MLC", "q": termino, "limit": 15},
+            headers=headers, timeout=15,
+        )
+        r.raise_for_status()
+        catalogo = r.json().get("results", [])
+    except Exception:
+        return resultados
+
+    for prod in catalogo:
+        catalog_product_id = prod.get("id") or prod.get("catalog_product_id")
+        nombre = prod.get("name") or "-"
+        if not catalog_product_id:
+            continue
+
+        try:
+            r_items = requests.get(
+                f"https://api.mercadolibre.com/products/{catalog_product_id}/items",
+                params={"status": "active", "limit": 50},
+                headers=headers, timeout=15,
+            )
+            items = r_items.json().get("results", [])
+        except Exception:
+            items = []
+
+        precios = [float(it["price"]) for it in items if it.get("price")]
+        if not precios:
+            continue
+
+        n_vendedores = len(items)
+        precio_min, precio_max = min(precios), max(precios)
+        precio_prom = sum(precios) / len(precios)
+        rango = "Alta demanda 🌟" if n_vendedores >= 8 else "Normal"
+        nombre_codificado = urllib.parse.quote(nombre)
+
+        resultados.append({
+            "🏆 Rango": rango,
+            "Producto": nombre,
+            "Precio Mínimo Mercado": f"${precio_min:,.0f}",
+            "Precio Promedio Mercado": f"${precio_prom:,.0f}",
+            "Precio Máximo Mercado": f"${precio_max:,.0f}",
+            "👥 Vendedores Compitiendo": n_vendedores,
+            "Enlace Directo": f"https://listado.mercadolibre.cl/{nombre_codificado}",
+        })
+
+    resultados.sort(key=lambda x: x["👥 Vendedores Compitiendo"], reverse=True)
+    return resultados
+
 st.set_page_config(page_title="Repricer by Avinari.cl", page_icon="🏢", layout="wide")
 
 col_logo, col_titulo = st.columns([1, 5])
@@ -382,7 +436,7 @@ m_protegidos.metric("Protección de Margen Mínimo", st.session_state.stats_actu
 
 st.divider()
 
-tab1, tab2 = st.tabs(["Ingreso por Lote de SKUs", "Barrido General de Catálogo"])
+tab1, tab2, tab3 = st.tabs(["📋 Ingreso por Lote de SKUs", "🔍 Barrido General de Catálogo", "🔥 Inteligencia de Compras"])
 
 with tab1:
     skus_input = st.text_area("SKUs (Separados por espacio o salto de línea)", height=150)
@@ -419,6 +473,42 @@ with tab2:
             res, sts = ejecutar_analisis_mercado(productos, prog, stat)
             st.session_state.resultados_escaneo = res
             st.session_state.stats_actuales = sts
+
+with tab3:
+    st.markdown("### 🔥 Inteligencia de Compras")
+    st.info(
+        "Busca una marca o producto para ver cuántos vendedores están compitiendo por él "
+        "en el catálogo de Mercado Libre y en qué rango de precios se mueven. Nota: la API "
+        "de Mercado Libre no entrega reseñas ni calificaciones para este tipo de credencial, "
+        "así que se usa la cantidad de vendedores compitiendo como indicador de qué tan "
+        "movido está ese producto en el mercado."
+    )
+    termino_busqueda = st.text_input("Marca o producto a investigar", placeholder="Ej: Lattafa Asad")
+
+    if st.button("🚀 Escanear Mercado", type="primary", width="stretch"):
+        if not termino_busqueda.strip():
+            st.warning("Ingresa una marca o producto para buscar.")
+        else:
+            if not st.session_state.token_ml:
+                with st.spinner("Validando credenciales con API Mercado Libre..."):
+                    r = requests.post("https://api.mercadolibre.com/oauth/token", data={"grant_type": "client_credentials", "client_id": ML_APP_ID, "client_secret": ML_SECRET_KEY}, timeout=15)
+                    st.session_state.token_ml = r.json().get("access_token")
+
+            with st.spinner(f"Escaneando catálogo de Mercado Libre para '{termino_busqueda}'..."):
+                datos_mercado = analizar_inteligencia_mercado(termino_busqueda.strip())
+
+            if not datos_mercado:
+                st.warning("No se encontraron productos de catálogo con competencia activa para ese término.")
+            else:
+                df_mercado = pd.DataFrame(datos_mercado)
+                st.dataframe(
+                    df_mercado,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Enlace Directo": st.column_config.LinkColumn("Enlace Directo", display_text="🔍 Ver Producto Original"),
+                    },
+                )
 
 if st.session_state.resultados_escaneo is not None:
     st.divider()
