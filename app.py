@@ -580,22 +580,31 @@ with tab3:
         "Busca una marca o producto para ver cuántos vendedores están compitiendo por él "
         "en el catálogo de Mercado Libre y en qué rango de precios se mueven."
     )
-    termino_busqueda = st.text_input("Marca o producto a investigar", placeholder="Ej: Lattafa Asad")
+    terminos_busqueda = st.text_area(
+        "Marca(s) o producto(s) a investigar (uno por línea)",
+        placeholder="Ej:\nLattafa Asad\nArmaf Club de Nuit\nperfume mujer",
+        height=100,
+    )
 
     if st.button("🚀 Escanear Mercado", type="primary", width="stretch"):
-        if not termino_busqueda.strip():
-            st.warning("Ingresa una marca o producto para buscar.")
+        lista_terminos = [t.strip() for t in terminos_busqueda.splitlines() if t.strip()]
+        if not lista_terminos:
+            st.warning("Ingresa al menos una marca o producto para buscar.")
         else:
             if not st.session_state.token_ml:
                 with st.spinner("Validando credenciales con API Mercado Libre..."):
                     r = requests.post("https://api.mercadolibre.com/oauth/token", data={"grant_type": "client_credentials", "client_id": ML_APP_ID, "client_secret": ML_SECRET_KEY}, timeout=15)
                     st.session_state.token_ml = r.json().get("access_token")
 
-            with st.spinner(f"Escaneando catálogo de Mercado Libre para '{termino_busqueda}'..."):
-                datos_mercado = analizar_inteligencia_mercado(termino_busqueda.strip())
+            datos_mercado = []
+            with st.spinner(f"Escaneando catálogo de Mercado Libre para {len(lista_terminos)} término(s)..."):
+                for termino in lista_terminos:
+                    for fila in analizar_inteligencia_mercado(termino):
+                        fila["🔎 Búsqueda"] = termino
+                        datos_mercado.append(fila)
 
             if not datos_mercado:
-                st.warning("No se encontraron productos de catálogo con competencia activa para ese término.")
+                st.warning("No se encontraron productos de catálogo con competencia activa para esos términos.")
             else:
                 df_mercado = pd.DataFrame(datos_mercado)
                 st.dataframe(
@@ -616,39 +625,51 @@ with tab4:
         "'zapatillas running') para ver el ranking oficial de más vendidos de Mercado "
         "Libre en esa categoría, y detectar qué productos no tienes en tu catálogo."
     )
-    termino_categoria = st.text_input("Categoría o tipo de producto", placeholder="Ej: perfume hombre", key="termino_tendencias")
+    terminos_categoria = st.text_area(
+        "Categoría(s) o tipo(s) de producto (uno por línea)",
+        placeholder="Ej:\nperfume hombre\nnotebook\nzapatillas running",
+        height=100,
+        key="termino_tendencias",
+    )
 
     if st.button("📈 Ver Más Vendidos", type="primary", width="stretch"):
-        if not termino_categoria.strip():
-            st.warning("Ingresa una categoría o tipo de producto.")
+        lista_categorias = [t.strip() for t in terminos_categoria.splitlines() if t.strip()]
+        if not lista_categorias:
+            st.warning("Ingresa al menos una categoría o tipo de producto.")
         else:
             if not st.session_state.token_ml:
                 with st.spinner("Validando credenciales con API Mercado Libre..."):
                     r = requests.post("https://api.mercadolibre.com/oauth/token", data={"grant_type": "client_credentials", "client_id": ML_APP_ID, "client_secret": ML_SECRET_KEY}, timeout=15)
                     st.session_state.token_ml = r.json().get("access_token")
 
-            with st.spinner(f"Buscando categoría para '{termino_categoria}'..."):
-                categoria = buscar_categoria_ml(termino_categoria.strip())
+            ranking_total = []
+            categorias_no_encontradas = []
+            with st.spinner(f"Buscando ranking de más vendidos para {len(lista_categorias)} categoría(s)..."):
+                for termino in lista_categorias:
+                    categoria = buscar_categoria_ml(termino)
+                    if not categoria:
+                        categorias_no_encontradas.append(termino)
+                        continue
+                    nombre_categoria = categoria.get("category_name", categoria.get("category_id"))
+                    for fila in obtener_mas_vendidos(categoria["category_id"]):
+                        fila["Categoría Buscada"] = nombre_categoria
+                        ranking_total.append(fila)
 
-            if not categoria:
-                st.warning("No se encontró una categoría de Mercado Libre para ese término. Prueba con otro nombre.")
+            if categorias_no_encontradas:
+                st.caption(f"⚠️ No se encontró categoría para: {', '.join(categorias_no_encontradas)}")
+
+            if not ranking_total:
+                st.warning("Mercado Libre no entregó un ranking de más vendidos para esas categorías.")
             else:
-                st.caption(f"Categoría detectada: **{categoria.get('category_name', categoria.get('category_id'))}**")
-                with st.spinner("Consultando ranking oficial de más vendidos..."):
-                    ranking = obtener_mas_vendidos(categoria["category_id"])
-
-                if not ranking:
-                    st.warning("Mercado Libre no entregó un ranking de más vendidos para esta categoría.")
-                else:
-                    df_ranking = pd.DataFrame(ranking)
-                    st.dataframe(
-                        df_ranking,
-                        hide_index=True,
-                        width="stretch",
-                        column_config={
-                            "Enlace Directo": st.column_config.LinkColumn("Enlace Directo", display_text="🔍 Ver Producto"),
-                        },
-                    )
+                df_ranking = pd.DataFrame(ranking_total)
+                st.dataframe(
+                    df_ranking,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Enlace Directo": st.column_config.LinkColumn("Enlace Directo", display_text="🔍 Ver Producto"),
+                    },
+                )
 
     st.divider()
     st.markdown("#### 🕒 Historial de Precios y Márgenes")
