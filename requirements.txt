@@ -5,3 +5,4 @@ python-dotenv
 bcrypt
 gspread
 google-auth
+streamlit-cookies-manager

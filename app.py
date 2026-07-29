@@ -9,7 +9,15 @@ import json
 import concurrent.futures
 import bcrypt
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from streamlit_cookies_manager import CookieManager
+
+st.set_page_config(page_title="Repricer by Avinari.cl", page_icon="🏢", layout="wide")
+
+cookies = CookieManager()
+if not cookies.ready():
+    st.stop()
+cookies._default_expiry = datetime.now() + timedelta(days=7)
 
 from repricer import (
     ML_APP_ID, ML_SECRET_KEY, BSALE_TOKEN, DIFERENCIAL_PRECIO, PAUSA_ML
@@ -52,25 +60,29 @@ def guardar_historial_precios(filas: list[list]):
         pass
 
 def verificar_login():
-    if st.session_state.get("autenticado"):
+    if st.session_state.get("autenticado") or cookies.get("autenticado") == "1":
+        st.session_state.autenticado = True
         return True
 
-    st.set_page_config(page_title="Repricer by Avinari.cl", page_icon="🏢", layout="centered")
-    st.markdown("<h2 style='text-align: center;'>🏢 Repricer by Avinari.cl</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #888;'>Acceso restringido</p>", unsafe_allow_html=True)
+    _, col_centro, _ = st.columns([1, 1.2, 1])
+    with col_centro:
+        st.markdown("<h2 style='text-align: center;'>🏢 Repricer by Avinari.cl</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #888;'>Acceso restringido</p>", unsafe_allow_html=True)
 
-    with st.form("login_form"):
-        usuario = st.text_input("Usuario")
-        clave = st.text_input("Contraseña", type="password")
-        enviado = st.form_submit_button("Ingresar", type="primary", width="stretch")
+        with st.form("login_form"):
+            usuario = st.text_input("Usuario")
+            clave = st.text_input("Contraseña", type="password")
+            enviado = st.form_submit_button("Ingresar", type="primary", width="stretch")
 
-    if enviado:
-        clave_valida = bcrypt.checkpw(clave.encode("utf-8"), APP_PASSWORD_HASH.encode("utf-8"))
-        if usuario == APP_USERNAME and clave_valida:
-            st.session_state.autenticado = True
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrectos.")
+        if enviado:
+            clave_valida = bcrypt.checkpw(clave.encode("utf-8"), APP_PASSWORD_HASH.encode("utf-8"))
+            if usuario == APP_USERNAME and clave_valida:
+                st.session_state.autenticado = True
+                cookies["autenticado"] = "1"
+                cookies.save()
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
 
     return False
 
@@ -490,8 +502,6 @@ def obtener_mas_vendidos(category_id: str, atributos_filtro: list = None, limite
         })
     return resultados
 
-st.set_page_config(page_title="Repricer by Avinari.cl", page_icon="🏢", layout="wide")
-
 col_logo, col_titulo = st.columns([1, 5])
 with col_logo:
     try: st.image("logo.png", width=120)
@@ -512,6 +522,9 @@ with st.sidebar:
 
     if st.button("🔒 Cerrar sesión", width="stretch"):
         st.session_state.autenticado = False
+        if "autenticado" in cookies:
+            del cookies["autenticado"]
+            cookies.save()
         st.rerun()
 
     st.markdown(f"<p style='text-align: center; color: #888; font-size: 0.8rem; margin-top: -10px; margin-bottom: 20px; font-weight: 500;'>Control Center | v19.1 (Dynamic Margin)<br>Target: Lista Bsale ID {TRUE_LIST_ID}</p>", unsafe_allow_html=True)
