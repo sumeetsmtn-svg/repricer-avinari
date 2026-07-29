@@ -36,6 +36,7 @@ class MLSkuResolver:
         self._token = access_token
         self._site_id = site_id
         self._seller_id: Optional[int] = None
+        self._indice_ean: Optional[dict[str, str]] = None
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -56,13 +57,18 @@ class MLSkuResolver:
                 log.info("Match rápido via seller_sku: %s → %s", variante, item_id)
                 return item_id
 
-        log.info("seller_sku vacío o no mapeado para '%s'. Iniciando fallback por EAN...", sku_raw)
-        item_id = self._buscar_por_ean_scan(seller_id, variantes)
-        if item_id:
-            log.info("Match por EAN attribute: %s → %s", sku_raw, item_id)
-        else:
-            log.warning("No se encontró item_id para SKU '%s'.", sku_raw)
-        return item_id
+        # El índice de EAN se construye una sola vez por sesión (no una vez por SKU),
+        # así el costo del escaneo completo del catálogo se paga solo la primera vez
+        # que se necesita, y no en cada SKU que no matchea por seller_sku.
+        indice = self._obtener_indice_ean(seller_id)
+        for variante in variantes:
+            item_id = indice.get(variante)
+            if item_id:
+                log.info("Match por EAN (índice): %s → %s", variante, item_id)
+                return item_id
+
+        log.warning("No se encontró item_id para SKU '%s'.", sku_raw)
+        return None
 
     def _obtener_seller_id(self) -> int:
         if self._seller_id is not None:
@@ -84,8 +90,12 @@ class MLSkuResolver:
             log.debug("seller_sku query falló para '%s': %s", sku, e)
             return None
 
-    def _buscar_por_ean_scan(self, seller_id: int, variantes_sku: list[str]) -> Optional[str]:
-        variantes_set = set(variantes_sku)
+    def _obtener_indice_ean(self, seller_id: int) -> dict[str, str]:
+        if self._indice_ean is not None:
+            return self._indice_ean
+
+        log.info("Construyendo índice de EAN del catálogo activo (una sola vez por sesión)...")
+        indice: dict[str, str] = {}
         offset = 0
         while offset < 1000:
             item_ids = self._obtener_pagina_items(seller_id, offset)
@@ -95,15 +105,17 @@ class MLSkuResolver:
                 batch = item_ids[i : i + BATCH_SIZE]
                 items_detalle = self._obtener_detalle_batch(batch)
                 for item in items_detalle:
-                    ean_values = self._extraer_eans(item)
-                    if ean_values & variantes_set:
-                        return item["id"]
+                    for ean in self._extraer_eans(item):
+                        indice.setdefault(ean, item["id"])
                 time.sleep(BATCH_DELAY_SEC)
             if len(item_ids) < PAGE_SIZE:
                 break
             offset += PAGE_SIZE
             time.sleep(SCROLL_DELAY_SEC)
-        return None
+
+        log.info("Índice de EAN construido: %d valores mapeados.", len(indice))
+        self._indice_ean = indice
+        return indice
 
     def _obtener_pagina_items(self, seller_id: int, offset: int) -> list[str]:
         url = f"{BASE_URL}/users/{seller_id}/items/search"

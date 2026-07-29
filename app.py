@@ -259,26 +259,10 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
     resolver = MLSkuResolver(access_token=st.session_state.token_ml)
     total = len(productos)
 
-    # --- DIAGNÓSTICO TEMPORAL DE VELOCIDAD (quitar una vez identificada la causa) ---
-    st.caption("🔍 Diagnóstico temporal: tiempo (segundos) por SKU, los 10 más lentos hasta ahora.")
-    diag_placeholder = st.empty()
-    diagnostico_tiempos = []
-    # --------------------------------------------------------------------------
-
     for i, p in enumerate(productos):
         status_text.text(f"Procesando SKU: {p.sku} - {p.nombre}")
-        t0_diag = time.time()
         ctx = obtener_contexto_buy_box(resolver, p.sku)
-        tiempo_sku = time.time() - t0_diag
         time.sleep(PAUSA_ML)
-
-        # --- DIAGNÓSTICO TEMPORAL ---
-        diagnostico_tiempos.append({"SKU": p.sku, "Segundos": round(tiempo_sku, 2)})
-        diag_placeholder.dataframe(
-            pd.DataFrame(diagnostico_tiempos).sort_values("Segundos", ascending=False).head(10),
-            hide_index=True, width="stretch",
-        )
-        # ----------------------------
 
         accion, motivo, target = "⚪ Ignorado", "Sin vinculación", None
         precio_rival_display = "N/A"
