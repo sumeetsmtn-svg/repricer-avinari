@@ -22,6 +22,7 @@ PAGE_SIZE = 100
 SCROLL_DELAY_SEC = 0.3
 BATCH_DELAY_SEC = 0.2
 EAN_ATTRIBUTE_IDS = {"EAN", "GTIN", "UPC", "ISBN", "MPN"}
+MAX_ITEMS_INDICE_EAN = 10000  # tope de seguridad; cubre catálogos de varios miles de productos
 
 class MLApiError(Exception):
     def __init__(self, status_code: int, message: str, url: str = ""):
@@ -96,11 +97,15 @@ class MLSkuResolver:
 
         log.info("Construyendo índice de EAN del catálogo activo (una sola vez por sesión)...")
         indice: dict[str, str] = {}
-        offset = 0
-        while offset < 1000:
-            item_ids = self._obtener_pagina_items(seller_id, offset)
+        total_escaneado = 0
+        scroll_id = None
+
+        while total_escaneado < MAX_ITEMS_INDICE_EAN:
+            item_ids, scroll_id = self._obtener_pagina_items_scroll(seller_id, scroll_id)
             if not item_ids:
                 break
+            total_escaneado += len(item_ids)
+
             for i in range(0, len(item_ids), BATCH_SIZE):
                 batch = item_ids[i : i + BATCH_SIZE]
                 items_detalle = self._obtener_detalle_batch(batch)
@@ -108,24 +113,29 @@ class MLSkuResolver:
                     for ean in self._extraer_eans(item):
                         indice.setdefault(ean, item["id"])
                 time.sleep(BATCH_DELAY_SEC)
-            if len(item_ids) < PAGE_SIZE:
+
+            if len(item_ids) < PAGE_SIZE or not scroll_id:
                 break
-            offset += PAGE_SIZE
             time.sleep(SCROLL_DELAY_SEC)
 
-        log.info("Índice de EAN construido: %d valores mapeados.", len(indice))
+        log.info("Índice de EAN construido: %d valores mapeados (de %d items escaneados).", len(indice), total_escaneado)
         self._indice_ean = indice
         return indice
 
-    def _obtener_pagina_items(self, seller_id: int, offset: int) -> list[str]:
+    def _obtener_pagina_items_scroll(self, seller_id: int, scroll_id: Optional[str]) -> tuple[list[str], Optional[str]]:
+        # /items/search con offset solo permite escanear los primeros 1000 resultados
+        # (Mercado Libre devuelve 400 más allá de eso). Para catálogos más grandes se
+        # usa la paginación "scroll" oficial, que no tiene ese límite.
         url = f"{BASE_URL}/users/{seller_id}/items/search"
-        params = {"status": "active", "limit": PAGE_SIZE, "offset": offset}
+        params = {"status": "active", "limit": PAGE_SIZE, "search_type": "scan"}
+        if scroll_id:
+            params["scroll_id"] = scroll_id
         try:
             resp = self._get(url, params=params)
-            return resp.get("results", [])
+            return resp.get("results", []), resp.get("scroll_id")
         except MLApiError as e:
-            log.error("ErrorDoc obteniendo página de items (offset=%d): %s", offset, e)
-            return []
+            log.error("Error obteniendo página de items (scroll_id=%s): %s", scroll_id, e)
+            return [], None
 
     def _obtener_detalle_batch(self, item_ids: list[str]) -> list[dict]:
         ids_str = ",".join(item_ids)
