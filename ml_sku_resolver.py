@@ -81,8 +81,11 @@ class MLSkuResolver:
         return self._seller_id
 
     def _buscar_por_seller_sku(self, seller_id: int, sku: str) -> Optional[str]:
+        # Sin filtro de estado: también deben encontrarse productos pausados (sin stock)
+        # o en revisión, ya que igual sirven para consultar precio de la competencia
+        # antes de reponer stock.
         url = f"{BASE_URL}/users/{seller_id}/items/search"
-        params = {"seller_sku": sku, "status": "active", "limit": 1}
+        params = {"seller_sku": sku, "limit": 1}
         try:
             resp = self._get(url, params=params)
             results = resp.get("results", [])
@@ -126,8 +129,10 @@ class MLSkuResolver:
         # /items/search con offset solo permite escanear los primeros 1000 resultados
         # (Mercado Libre devuelve 400 más allá de eso). Para catálogos más grandes se
         # usa la paginación "scroll" oficial, que no tiene ese límite.
+        # Sin filtro de "status": también deben indexarse productos pausados (sin stock)
+        # o en revisión, para poder consultar precio de competencia antes de reponerlos.
         url = f"{BASE_URL}/users/{seller_id}/items/search"
-        params = {"status": "active", "limit": PAGE_SIZE, "search_type": "scan"}
+        params = {"limit": PAGE_SIZE, "search_type": "scan"}
         if scroll_id:
             params["scroll_id"] = scroll_id
         try:
