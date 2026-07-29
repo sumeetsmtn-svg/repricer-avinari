@@ -202,7 +202,10 @@ class MLSkuResolver:
         return resultado
 
     def _get(self, url: str, params: Optional[dict] = None) -> dict:
-        resp = self._session.get(url, params=params, timeout=15)
+        try:
+            resp = self._session.get(url, params=params, timeout=15)
+        except requests.exceptions.RequestException as e:
+            raise MLApiError(0, f"Error de red: {e}", url)
         if not resp.ok:
             try:
                 msg = resp.json().get("message", resp.text[:200])
@@ -212,7 +215,10 @@ class MLSkuResolver:
         return resp.json()
 
     def _get_lista(self, url: str, params: Optional[dict] = None) -> list:
-        resp = self._session.get(url, params=params, timeout=15)
+        try:
+            resp = self._session.get(url, params=params, timeout=15)
+        except requests.exceptions.RequestException as e:
+            raise MLApiError(0, f"Error de red: {e}", url)
         if not resp.ok:
             try:
                 msg = resp.json().get("message", resp.text[:200])

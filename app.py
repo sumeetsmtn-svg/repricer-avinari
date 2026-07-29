@@ -272,8 +272,19 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
     total = len(productos)
 
     for i, p in enumerate(productos):
-        status_text.text(f"Procesando SKU: {p.sku} - {p.nombre}")
-        ctx = obtener_contexto_buy_box(resolver, p.sku)
+        if resolver._indice_ean is None:
+            status_text.text(
+                f"Procesando SKU: {p.sku} - {p.nombre}  "
+                f"(si no encuentra match rápido, puede tardar unos minutos construyendo "
+                f"el índice completo del catálogo — solo pasa una vez por corrida)"
+            )
+        else:
+            status_text.text(f"Procesando SKU: {p.sku} - {p.nombre}")
+
+        try:
+            ctx = obtener_contexto_buy_box(resolver, p.sku)
+        except Exception:
+            ctx = None
         time.sleep(PAUSA_ML)
 
         accion, motivo, target = "⚪ Ignorado", "Sin vinculación", None
