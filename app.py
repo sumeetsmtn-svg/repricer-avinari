@@ -409,6 +409,104 @@ def _elegir_mejor_match(termino: str, candidatos: list[dict]) -> dict | None:
             mejor = cand
     return mejor
 
+# --- Cruce de productos de Mercado Libre contra el inventario de Bsale ---
+# Bsale busca por texto EXACTO (substring), no por palabras sueltas como Mercado
+# Libre, así que hay que armar la búsqueda distinto: se prueban pares de palabras
+# CONSECUTIVAS (en el orden original, sin sacar conectores como "de" ya que a veces
+# son parte literal del nombre) y se combinan los resultados de los pares que den
+# una cantidad razonable de candidatos, para no perder el producto correcto solo
+# porque un par puntual dio con la marca equivocada por casualidad.
+_GENERICAS_BSALE = {"edt", "edp", "ml", "spray", "eau", "toilette", "parfum", "perfume", "set", "for", "de", "la", "el", "con", "por", "y", "the", "a", "en"}
+_GENERO_BSALE = {
+    "hombre": "genhombre", "man": "genhombre", "men": "genhombre", "masculino": "genhombre", "homme": "genhombre",
+    "mujer": "genmujer", "woman": "genmujer", "women": "genmujer", "femenino": "genmujer", "femme": "genmujer", "dama": "genmujer",
+    "unisex": "genunisex",
+}
+
+def _tokens_relevantes_bsale(texto: str) -> set:
+    palabras = re.findall(r"[a-zA-Z]+|[0-9]+", texto)
+    return {_GENERO_BSALE.get(p.lower(), p.lower()) for p in palabras if p.lower() not in _GENERICAS_BSALE}
+
+def _puntaje_similitud_bsale(tokens_busqueda: set, tokens_candidato: set) -> tuple[int, int]:
+    comunes = tokens_busqueda & tokens_candidato
+    score = len(comunes)
+    for genero in ("genhombre", "genmujer", "genunisex"):
+        if genero in comunes:
+            score += 3  # el genero pesa mas que un token cualquiera (evita confundir hombre/mujer)
+    return score, len(comunes)
+
+def _buscar_producto_bsale(nombre_producto: str) -> dict | None:
+    headers = {"access_token": TOKEN_BSALE, "Content-Type": "application/json"}
+    base_url = "https://api.bsale.io/v1"
+    palabras = re.findall(r"[a-zA-Z]+|[0-9]+", nombre_producto)
+    bigramas = [f"{palabras[i]} {palabras[i+1]}" for i in range(len(palabras) - 1)]
+
+    pool, respaldo = {}, {}
+    for bigrama in bigramas:
+        try:
+            r = BSALE_SESSION.get(f"{base_url}/products.json", headers=headers, params={"name": bigrama, "limit": 20}, timeout=15)
+            items = r.json().get("items", [])
+        except Exception:
+            continue
+        n = len(items)
+        if 1 <= n <= 15:
+            for it in items:
+                pool[it["id"]] = it
+        elif n > 0:
+            for it in items:
+                respaldo[it["id"]] = it
+
+    candidatos = list(pool.values()) or list(respaldo.values())
+    if not candidatos:
+        return None
+
+    tb = _tokens_relevantes_bsale(nombre_producto)
+    mejor, mejor_score, mejor_comunes, mejor_extras = None, -1, 0, 0
+    for c in candidatos:
+        tokens_c = _tokens_relevantes_bsale(c.get("name") or "")
+        s, comunes = _puntaje_similitud_bsale(tb, tokens_c)
+        extras = len(tokens_c) - comunes  # palabras del candidato que no pidió la búsqueda
+        # En empate de puntaje, gana el candidato con MENOS palabras de más (más
+        # parecido exacto) - evita elegir p.ej. una variante "Bourbon" cuando existe
+        # la version simple que calza igual de bien con lo buscado.
+        if s > mejor_score or (s == mejor_score and extras < mejor_extras):
+            mejor_score, mejor, mejor_comunes, mejor_extras = s, c, comunes, extras
+
+    # Umbral mínimo de confianza: se exige un puntaje mínimo Y que la mayoría de
+    # las palabras buscadas realmente estén en el candidato (recall). Sin esto
+    # último, algo como "iPhone 15 Pro Max 256GB" podía matchear una simple lámina
+    # protectora de pantalla que solo menciona "iPhone 15 Pro Max" de paso.
+    recall = (mejor_comunes / len(tb)) if tb else 0
+    if not mejor or mejor_score < 4 or recall < 0.7:
+        return None
+    return mejor
+
+def _obtener_stock_bsale(product_id) -> int:
+    headers = {"access_token": TOKEN_BSALE, "Content-Type": "application/json"}
+    base_url = "https://api.bsale.io/v1"
+    try:
+        r_var = BSALE_SESSION.get(f"{base_url}/products/{product_id}/variants.json", headers=headers, timeout=15)
+        variantes = r_var.json().get("items", [])
+    except Exception:
+        return 0
+
+    total = 0.0
+    for v in variantes:
+        vid = v.get("id")
+        try:
+            r_stock = BSALE_SESSION.get(f"{base_url}/stocks.json", headers=headers, params={"variantid": vid}, timeout=15)
+            total += sum(float(s.get("quantity") or 0) for s in r_stock.json().get("items", []))
+        except Exception:
+            continue
+    return int(total)
+
+def buscar_stock_bsale(nombre_producto: str) -> dict:
+    producto = _buscar_producto_bsale(nombre_producto)
+    if not producto:
+        return {"tenemos": False, "stock": 0, "nombre_bsale": None}
+    stock = _obtener_stock_bsale(producto["id"])
+    return {"tenemos": True, "stock": stock, "nombre_bsale": producto.get("name")}
+
 def analizar_inteligencia_mercado(termino: str) -> list[dict]:
     headers = {"Authorization": f"Bearer {st.session_state.token_ml}"}
     resultados = []
@@ -565,9 +663,18 @@ def obtener_mas_vendidos(category_id: str, atributos_filtro: list = None, limite
         precios = [float(it["price"]) for it in items if it.get("price")]
         nombre_codificado = urllib.parse.quote(nombre)
 
+        info_bsale = buscar_stock_bsale(nombre)
+        if not info_bsale["tenemos"]:
+            stock_display = "❌ No lo tenemos"
+        elif info_bsale["stock"] > 0:
+            stock_display = f"✅ Sí ({info_bsale['stock']} unidades)"
+        else:
+            stock_display = "⚠️ Lo tenemos, sin stock"
+
         resultados.append({
             "🏅 Puesto": posicion,
             "Producto": nombre,
+            "📦 ¿Tenemos Stock?": stock_display,
             "👥 Vendedores Activos": len(items),
             "Precio Mínimo": f"${min(precios):,.0f}" if precios else "-",
             "Precio Máximo": f"${max(precios):,.0f}" if precios else "-",
