@@ -290,7 +290,8 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
         accion, motivo, target = "⚪ Ignorado", "Sin vinculación", None
         precio_rival_display = "N/A"
         rival_nombre_display = "-"
-        
+        estado_publicacion_display = ctx.get("estado_publicacion") if ctx else "-"
+
         precio_bsale_display = f"${p.precio_actual:,.0f}"
         
         precio_ml = p.precio_actual
@@ -355,6 +356,7 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
             "Margen Actual": margen_actual_display,
             "Rival Más Barato": precio_rival_display,
             "Vendedor Rival": rival_nombre_display,
+            "Estado Publicación": estado_publicacion_display,
             "Acción": accion,
             "Precio Sugerido": nuevo_precio_display,
             "Precio Final": precio_final_editable,    # Editable
@@ -741,10 +743,25 @@ with tab4:
                     df_sku = df_historial[df_historial["SKU"].astype(str) == sku_elegido]
                     st.dataframe(df_sku, hide_index=True, width="stretch")
 
+COLUMNAS_SIEMPRE_VISIBLES_INICIO = ["Aprobar", "SKU", "Producto"]
+COLUMNAS_OPCIONALES = ["Enlace ML", "Stock", "Precio Bsale", "Precio ML", "Margen Actual", "Rival Más Barato", "Vendedor Rival", "Estado Publicación", "Acción", "Precio Sugerido", "Detalle"]
+COLUMNAS_SIEMPRE_VISIBLES_FIN = ["Precio Final", "Margen Nuevo"]
+
 if st.session_state.resultados_escaneo is not None:
     st.divider()
     st.markdown("### Panel de Aprobación")
-    
+
+    if "columnas_opcionales_visibles" not in st.session_state:
+        st.session_state.columnas_opcionales_visibles = COLUMNAS_OPCIONALES.copy()
+
+    st.session_state.columnas_opcionales_visibles = st.multiselect(
+        "Columnas a mostrar (SKU, Producto, Precio Final y Margen Nuevo siempre quedan visibles)",
+        options=COLUMNAS_OPCIONALES,
+        default=st.session_state.columnas_opcionales_visibles,
+    )
+    columnas_elegidas = [c for c in COLUMNAS_OPCIONALES if c in st.session_state.columnas_opcionales_visibles]
+    orden_columnas = COLUMNAS_SIEMPRE_VISIBLES_INICIO + columnas_elegidas + COLUMNAS_SIEMPRE_VISIBLES_FIN
+
     df = pd.DataFrame(st.session_state.resultados_escaneo)
     df_mostrar = df[df["Acción"].isin(filtros_accion)] if filtros_accion else df
 
@@ -755,7 +772,8 @@ if st.session_state.resultados_escaneo is not None:
         df_mostrar,
         width="stretch",
         hide_index=True,
-        disabled=["SKU", "Producto", "Enlace ML", "Stock", "Precio Bsale", "Precio ML", "Margen Actual", "Rival Más Barato", "Vendedor Rival", "Acción", "Precio Sugerido", "Margen Nuevo", "Detalle"],
+        column_order=orden_columnas,
+        disabled=["SKU", "Producto", "Enlace ML", "Stock", "Precio Bsale", "Precio ML", "Margen Actual", "Rival Más Barato", "Vendedor Rival", "Estado Publicación", "Acción", "Precio Sugerido", "Margen Nuevo", "Detalle"],
         column_config={
             "Aprobar": st.column_config.CheckboxColumn("Aprobar", default=False),
             "Enlace ML": st.column_config.LinkColumn("Enlace ML", display_text="Revisar Publicación"),
