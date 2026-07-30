@@ -281,6 +281,7 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
     mejor_precio = None
     mejor_item_id = None
     mejor_seller_id = None
+    mejor_es_internacional = False
 
     try:
         offset = 0
@@ -305,6 +306,10 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
                         mejor_precio = comp_price_float
                         mejor_item_id = comp_item_id
                         mejor_seller_id = comp.get("seller_id")
+                        # Ventas internacionales (Cross Border Trade): Mercado Libre a veces
+                        # muestra en la página pública un nombre de tienda distinto al nickname
+                        # real de la cuenta para este tipo de publicación.
+                        mejor_es_internacional = "cbt_item" in (comp.get("tags") or [])
 
             offset += 50
             if len(lista_competidores) < 50:
@@ -342,5 +347,6 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
         "ganando_buy_box": ganando,
         "buy_box_winner_id": mejor_item_id,
         "rival_nombre": rival_nombre,
+        "rival_internacional": mejor_es_internacional,
         "estado_publicacion": estado_publicacion,
     }

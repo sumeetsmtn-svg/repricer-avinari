@@ -316,6 +316,8 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
             else:
                 precio_rival_display = f"${precio_rival:,.0f}"
                 rival_nombre_display = ctx.get("rival_nombre") or "Desconocido"
+                if ctx.get("rival_internacional"):
+                    rival_nombre_display += " 🌎 (Internacional)"
                 target = round(precio_rival - DIFERENCIAL_PRECIO, 2)
 
                 # REGLA FUEGO AMIGO
