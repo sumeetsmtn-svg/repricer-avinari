@@ -441,10 +441,19 @@ def _buscar_producto_bsale(nombre_producto: str) -> dict | None:
     palabras = re.findall(r"[a-zA-Z]+|[0-9]+", nombre_producto)
     bigramas = [f"{palabras[i]} {palabras[i+1]}" for i in range(len(palabras) - 1)]
 
+    # Respaldo con palabras sueltas distintivas: Mercado Libre y Bsale a veces
+    # escriben el mismo producto en orden distinto (ej. "Hayaati De Lattafa" en ML
+    # vs "Lattafa Hayaati" en Bsale) - ahí ningún par consecutivo calza, pero una
+    # palabra sola sí encuentra el producto sin importar el orden.
+    palabras_significativas = sorted(
+        {p for p in palabras if p.lower() not in _GENERICAS_BSALE and len(p) > 3},
+        key=len, reverse=True,
+    )[:3]
+
     pool, respaldo = {}, {}
-    for bigrama in bigramas:
+    for termino_busqueda in bigramas + palabras_significativas:
         try:
-            r = BSALE_SESSION.get(f"{base_url}/products.json", headers=headers, params={"name": bigrama, "limit": 20}, timeout=15)
+            r = BSALE_SESSION.get(f"{base_url}/products.json", headers=headers, params={"name": termino_busqueda, "limit": 20}, timeout=15)
             items = r.json().get("items", [])
         except Exception:
             continue
@@ -477,7 +486,12 @@ def _buscar_producto_bsale(nombre_producto: str) -> dict | None:
     # último, algo como "iPhone 15 Pro Max 256GB" podía matchear una simple lámina
     # protectora de pantalla que solo menciona "iPhone 15 Pro Max" de paso.
     recall = (mejor_comunes / len(tb)) if tb else 0
-    if not mejor or mejor_score < 4 or recall < 0.7:
+    if not mejor or recall < 0.7 or mejor_score < 3:
+        return None
+    # Un puntaje de 3 es el mínimo posible sin bonus de género (ej. productos
+    # "Unisex" o búsquedas sin palabra de género) - ahí se exige que calce el 100%
+    # de lo buscado para aceptarlo, ya que no hay margen extra de confianza.
+    if mejor_score == 3 and recall < 1.0:
         return None
     return mejor
 
