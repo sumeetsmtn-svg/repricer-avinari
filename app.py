@@ -390,22 +390,15 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
     try:
         r = requests.get(
             "https://api.mercadolibre.com/products/search",
-            params={"site_id": "MLC", "q": termino, "limit": 15},
+            params={"site_id": "MLC", "q": termino, "limit": 1},
             headers=headers, timeout=15,
         )
         r.raise_for_status()
-        catalogo = r.json().get("results", [])
+        # Solo el resultado más relevante: el usuario busca UN producto puntual, no
+        # todas las variantes/tamaños de la marca (eso llenaba la tabla de ruido).
+        catalogo = r.json().get("results", [])[:1]
     except Exception:
         return resultados
-
-    # Mercado Libre a veces mezcla categorías totalmente distintas en la misma búsqueda
-    # (ej. "Michael Kors Gorgeous" trae también mochilas, relojes, carteras). Se asume
-    # que el primer resultado es el más relevante y se descarta lo que no sea de su
-    # misma categoría (domain_id), para no llenar la tabla de productos no relacionados.
-    if catalogo:
-        domain_principal = catalogo[0].get("domain_id")
-        if domain_principal:
-            catalogo = [p for p in catalogo if p.get("domain_id") == domain_principal]
 
     for prod in catalogo:
         catalog_product_id = prod.get("id") or prod.get("catalog_product_id")
@@ -472,9 +465,6 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
             "Enlace Directo": f"https://listado.mercadolibre.cl/{nombre_codificado}",
         })
 
-    # Las filas con competencia real detectada quedan primero, para que no se
-    # entierren entre las variantes de catálogo sin ningún vendedor activo.
-    resultados.sort(key=lambda x: x["👥 Vendedores Compitiendo"], reverse=True)
     return resultados
 
 def buscar_categoria_ml(termino: str) -> dict | None:
@@ -672,13 +662,13 @@ with tab2:
 with tab3:
     st.markdown("### 🔥 Inteligencia de Compras")
     st.info(
-        "Busca una marca o producto para ver cuántos vendedores están compitiendo por él "
-        "en el catálogo de Mercado Libre y en qué rango de precios se mueven. **Tip**: incluye "
-        "la palabra 'perfume' en la búsqueda (ej. 'perfume Michael Kors Gorgeous 100ml mujer') "
-        "para resultados más precisos — sin ella, Mercado Libre a veces prioriza otras cosas de "
-        "la misma marca (carteras, relojes, etc.). Las filas con competencia real quedan primero; "
-        "las que dicen 'Sin competencia activa' son variantes de catálogo sin ningún vendedor "
-        "activo ahora mismo."
+        "Escribe el producto exacto que buscas (uno por línea) y te trae el resultado más "
+        "relevante de cada uno: cuántos vendedores compiten, rango de precios y quién tiene "
+        "el más barato. **Tip**: incluye la palabra 'perfume' en la búsqueda "
+        "(ej. 'perfume Michael Kors Gorgeous 100ml mujer') para que Mercado Libre encuentre el "
+        "producto correcto — sin ella, a veces prioriza otras cosas de la misma marca "
+        "(carteras, relojes, etc.). Si dice 'Sin competencia activa' es porque esa publicación "
+        "no tiene ningún vendedor activo ahora mismo."
     )
     terminos_busqueda = st.text_area(
         "Marca(s) o producto(s) a investigar (uno por línea)",
@@ -702,6 +692,10 @@ with tab3:
                     for fila in analizar_inteligencia_mercado(termino):
                         fila["🔎 Búsqueda"] = termino
                         datos_mercado.append(fila)
+
+            # Con varios términos buscados a la vez, los que sí tienen competencia real
+            # quedan primero en la tabla combinada.
+            datos_mercado.sort(key=lambda x: x["👥 Vendedores Compitiendo"], reverse=True)
 
             if not datos_mercado:
                 st.warning("No se encontraron productos de catálogo con competencia activa para esos términos.")
