@@ -327,8 +327,10 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
     # Nota: /items/{id} de un item ajeno devuelve 403 (access_denied) con un token de
     # app (client_credentials). Por eso el seller_id del rival sale de la misma
     # consulta al catálogo público de arriba, nunca del item directamente.
+    # Se resuelve el nombre del rival aunque estemos ganando (util para saber a quien
+    # se le esta ganando y si es una oferta internacional a tener en el radar).
     rival_nombre = None
-    if mejor_seller_id and not ganando:
+    if mejor_seller_id:
         try:
             seller_data = resolver._get(
                 f"https://api.mercadolibre.com/users/{mejor_seller_id}",
