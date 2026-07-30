@@ -246,7 +246,12 @@ def _formatear_estado_publicacion(status: Optional[str], sub_status) -> str:
         etiqueta += " (sin stock)"
     return etiqueta
 
-def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optional[dict]:
+def obtener_contexto_buy_box(
+    resolver: MLSkuResolver,
+    sku_bsale: str,
+    nombre_producto: Optional[str] = None,
+    verificacion_profunda: bool = False,
+) -> Optional[dict]:
     item_id = resolver.resolver_sku(sku_bsale)
     if not item_id:
         return None
@@ -317,6 +322,40 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
 
     except Exception:
         pass
+
+    # Verificación profunda (opcional, más lenta): Mercado Libre a veces cataloga el
+    # mismo producto físico bajo varios catalog_product_id distintos ("hermanos"). Se
+    # buscan por nombre y se revisa si alguno tiene un precio más barato que el ya
+    # encontrado en nuestro propio catálogo. Solo encuentra productos de catálogo -
+    # publicaciones sueltas sin catálogo quedan fuera de alcance de todas formas,
+    # ya que el buscador general de Mercado Libre está bloqueado para este token.
+    if verificacion_profunda and nombre_producto:
+        try:
+            r_search = resolver._get(
+                "https://api.mercadolibre.com/products/search",
+                params={"site_id": "MLC", "q": nombre_producto, "limit": 5},
+            )
+            for candidato in r_search.get("results", []):
+                cand_id = candidato.get("id") or candidato.get("catalog_product_id")
+                if not cand_id or cand_id == catalog_product_id:
+                    continue
+                try:
+                    items_cand = resolver._get(
+                        f"https://api.mercadolibre.com/products/{cand_id}/items",
+                        params={"status": "active", "limit": 50}
+                    )
+                    lista_cand = items_cand.get("results") or items_cand.get("items_with_buy_box") or []
+                    for comp in lista_cand:
+                        comp_price = comp.get("price")
+                        if comp_price and (mejor_precio is None or float(comp_price) < mejor_precio):
+                            mejor_precio = float(comp_price)
+                            mejor_item_id = comp.get("item_id") or comp.get("id")
+                            mejor_seller_id = comp.get("seller_id")
+                            mejor_es_internacional = "cbt_item" in (comp.get("tags") or [])
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     ganando = (
         precio_propio is not None

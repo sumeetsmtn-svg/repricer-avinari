@@ -265,7 +265,7 @@ def bsale_cargar_productos_por_sku(lista_skus: list, true_list_id: int) -> list[
         resultados = executor.map(lambda sku: _cargar_un_sku(sku, true_list_id), lista_skus)
         return [p for p in resultados if p is not None]
 
-def ejecutar_analisis_mercado(productos, progress_bar, status_text):
+def ejecutar_analisis_mercado(productos, progress_bar, status_text, verificacion_profunda=False):
     stats = {"analizados": 0, "subidas": 0, "bajadas": 0, "protegidos": 0}
     resultados = []
     resolver = MLSkuResolver(access_token=st.session_state.token_ml)
@@ -282,7 +282,7 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text):
             status_text.text(f"Procesando SKU: {p.sku} - {p.nombre}")
 
         try:
-            ctx = obtener_contexto_buy_box(resolver, p.sku)
+            ctx = obtener_contexto_buy_box(resolver, p.sku, nombre_producto=p.nombre, verificacion_profunda=verificacion_profunda)
         except Exception:
             ctx = None
         time.sleep(PAUSA_ML)
@@ -575,7 +575,12 @@ with st.sidebar:
     
     st.header("Configuración del Sistema")
     limite = st.selectbox("Volumen de escaneo", options=[10, 50, 100, 500, 1000], index=0)
-    
+    verificacion_profunda = st.checkbox(
+        "🔍 Verificación profunda (más lenta)",
+        value=False,
+        help="Busca el mismo producto en catálogos 'hermanos' de Mercado Libre por si el precio más barato real está en un catálogo distinto al que está vinculada tu publicación. Solo funciona con productos de catálogo. Puede tardar varios segundos más por SKU.",
+    )
+
     st.divider()
     st.header("Filtros de Acción")
     opciones_accion = ["🟢 SUBIR PRECIO", "🔴 BAJAR PRECIO", "🔴 Bloqueado (Piso)", "🟢 Liderando", "⚪ Mantener", "⚪ Ignorado"]
@@ -633,7 +638,7 @@ with tab1:
             else:
                 prog = st.progress(0)
                 stat = st.empty()
-                res, sts = ejecutar_analisis_mercado(productos, prog, stat)
+                res, sts = ejecutar_analisis_mercado(productos, prog, stat, verificacion_profunda)
                 st.session_state.resultados_escaneo = res
                 st.session_state.stats_actuales = sts
 
@@ -648,7 +653,7 @@ with tab2:
         else:
             prog = st.progress(0)
             stat = st.empty()
-            res, sts = ejecutar_analisis_mercado(productos, prog, stat)
+            res, sts = ejecutar_analisis_mercado(productos, prog, stat, verificacion_profunda)
             st.session_state.resultados_escaneo = res
             st.session_state.stats_actuales = sts
 
