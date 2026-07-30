@@ -242,8 +242,13 @@ ESTADO_LABELS = {
 
 def _formatear_estado_publicacion(status: Optional[str], sub_status) -> str:
     etiqueta = ESTADO_LABELS.get(status, status or "Desconocido")
-    if isinstance(sub_status, list) and "out_of_stock" in sub_status:
-        etiqueta += " (sin stock)"
+    if isinstance(sub_status, list):
+        if "forbidden" in sub_status:
+            # Mercado Libre bloquea la publicación (ej. restricción de marca/política,
+            # no un simple "en revisión" de rutina).
+            etiqueta += " ⛔ (bloqueada)"
+        if "out_of_stock" in sub_status:
+            etiqueta += " (sin stock)"
     return etiqueta
 
 def obtener_contexto_buy_box(
