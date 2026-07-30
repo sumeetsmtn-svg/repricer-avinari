@@ -383,6 +383,21 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text, verificacion
     st.success("Análisis de mercado finalizado. Esperando revisión.")
     return resultados, stats
 
+def _tokenizar(texto: str) -> set:
+    # Separa numeros de letras (ej. "100ml" -> {"100","ml"}) para que calce igual
+    # contra nombres que traen el tamaño con espacio ("100 Ml").
+    return set(re.findall(r"[a-z]+|[0-9]+", texto.lower()))
+
+def _elegir_mejor_match(termino: str, candidatos: list[dict]) -> dict | None:
+    tokens_busqueda = _tokenizar(termino)
+    mejor, mejor_score = None, -1
+    for cand in candidatos:
+        score = len(tokens_busqueda & _tokenizar(cand.get("name") or ""))
+        if score > mejor_score:
+            mejor_score = score
+            mejor = cand
+    return mejor
+
 def analizar_inteligencia_mercado(termino: str) -> list[dict]:
     headers = {"Authorization": f"Bearer {st.session_state.token_ml}"}
     resultados = []
@@ -390,13 +405,15 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
     try:
         r = requests.get(
             "https://api.mercadolibre.com/products/search",
-            params={"site_id": "MLC", "q": termino, "limit": 1},
+            params={"site_id": "MLC", "q": termino, "limit": 15},
             headers=headers, timeout=15,
         )
         r.raise_for_status()
-        # Solo el resultado más relevante: el usuario busca UN producto puntual, no
-        # todas las variantes/tamaños de la marca (eso llenaba la tabla de ruido).
-        catalogo = r.json().get("results", [])[:1]
+        candidatos = r.json().get("results", [])
+        # Solo el resultado que mejor calza con lo escrito (marca, tamaño, género),
+        # no simplemente el que Mercado Libre puso primero en su propio orden.
+        mejor = _elegir_mejor_match(termino, candidatos)
+        catalogo = [mejor] if mejor else []
     except Exception:
         return resultados
 
