@@ -275,14 +275,25 @@ def ejecutar_analisis_mercado(productos, progress_bar, status_text, verificacion
         if resolver._indice_ean is None:
             status_text.text(
                 f"Procesando SKU: {p.sku} - {p.nombre}  "
-                f"(si no encuentra match rápido, puede tardar unos minutos construyendo "
-                f"el índice completo del catálogo — solo pasa una vez por corrida)"
+                f"(no matchea rápido — construyendo el índice completo del catálogo, "
+                f"solo pasa una vez por corrida)"
             )
+
+            def _reportar_progreso(cantidad, _p=p):
+                status_text.text(
+                    f"Procesando SKU: {_p.sku} - {_p.nombre}  "
+                    f"(construyendo índice del catálogo: {cantidad} productos escaneados hasta ahora)"
+                )
         else:
             status_text.text(f"Procesando SKU: {p.sku} - {p.nombre}")
+            _reportar_progreso = None
 
         try:
-            ctx = obtener_contexto_buy_box(resolver, p.sku, nombre_producto=p.nombre, verificacion_profunda=verificacion_profunda)
+            ctx = obtener_contexto_buy_box(
+                resolver, p.sku, nombre_producto=p.nombre,
+                verificacion_profunda=verificacion_profunda,
+                progreso_callback=_reportar_progreso,
+            )
         except Exception:
             ctx = None
         time.sleep(PAUSA_ML)

@@ -19,8 +19,8 @@ logging.basicConfig(
 BASE_URL = "https://api.mercadolibre.com"
 BATCH_SIZE = 20
 PAGE_SIZE = 100
-SCROLL_DELAY_SEC = 0.3
-BATCH_DELAY_SEC = 0.2
+SCROLL_DELAY_SEC = 0.15
+BATCH_DELAY_SEC = 0.1
 EAN_ATTRIBUTE_IDS = {"EAN", "GTIN", "UPC", "ISBN", "MPN"}
 MAX_ITEMS_INDICE_EAN = 10000  # tope de seguridad; cubre catálogos de varios miles de productos
 
@@ -47,7 +47,7 @@ class MLSkuResolver:
             }
         )
 
-    def resolver_sku(self, sku_raw: str) -> Optional[str]:
+    def resolver_sku(self, sku_raw: str, progreso_callback=None) -> Optional[str]:
         variantes = self._normalizar_sku(sku_raw)
         log.info("Resolviendo SKU '%s' → variantes: %s", sku_raw, variantes)
         seller_id = self._obtener_seller_id()
@@ -61,7 +61,7 @@ class MLSkuResolver:
         # El índice de EAN se construye una sola vez por sesión (no una vez por SKU),
         # así el costo del escaneo completo del catálogo se paga solo la primera vez
         # que se necesita, y no en cada SKU que no matchea por seller_sku.
-        indice = self._obtener_indice_ean(seller_id)
+        indice = self._obtener_indice_ean(seller_id, progreso_callback)
         for variante in variantes:
             item_id = indice.get(variante)
             if item_id:
@@ -94,7 +94,7 @@ class MLSkuResolver:
             log.debug("seller_sku query falló para '%s': %s", sku, e)
             return None
 
-    def _obtener_indice_ean(self, seller_id: int) -> dict[str, str]:
+    def _obtener_indice_ean(self, seller_id: int, progreso_callback=None) -> dict[str, str]:
         if self._indice_ean is not None:
             return self._indice_ean
 
@@ -108,6 +108,11 @@ class MLSkuResolver:
             if not item_ids:
                 break
             total_escaneado += len(item_ids)
+            if progreso_callback:
+                try:
+                    progreso_callback(total_escaneado)
+                except Exception:
+                    pass
 
             for i in range(0, len(item_ids), BATCH_SIZE):
                 batch = item_ids[i : i + BATCH_SIZE]
@@ -256,8 +261,9 @@ def obtener_contexto_buy_box(
     sku_bsale: str,
     nombre_producto: Optional[str] = None,
     verificacion_profunda: bool = False,
+    progreso_callback=None,
 ) -> Optional[dict]:
-    item_id = resolver.resolver_sku(sku_bsale)
+    item_id = resolver.resolver_sku(sku_bsale, progreso_callback=progreso_callback)
     if not item_id:
         return None
 
