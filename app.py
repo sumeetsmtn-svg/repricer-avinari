@@ -398,6 +398,15 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
     except Exception:
         return resultados
 
+    # Mercado Libre a veces mezcla categorías totalmente distintas en la misma búsqueda
+    # (ej. "Michael Kors Gorgeous" trae también mochilas, relojes, carteras). Se asume
+    # que el primer resultado es el más relevante y se descarta lo que no sea de su
+    # misma categoría (domain_id), para no llenar la tabla de productos no relacionados.
+    if catalogo:
+        domain_principal = catalogo[0].get("domain_id")
+        if domain_principal:
+            catalogo = [p for p in catalogo if p.get("domain_id") == domain_principal]
+
     for prod in catalogo:
         catalog_product_id = prod.get("id") or prod.get("catalog_product_id")
         nombre = prod.get("name") or "-"
@@ -463,6 +472,9 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
             "Enlace Directo": f"https://listado.mercadolibre.cl/{nombre_codificado}",
         })
 
+    # Las filas con competencia real detectada quedan primero, para que no se
+    # entierren entre las variantes de catálogo sin ningún vendedor activo.
+    resultados.sort(key=lambda x: x["👥 Vendedores Compitiendo"], reverse=True)
     return resultados
 
 def buscar_categoria_ml(termino: str) -> dict | None:
@@ -661,7 +673,12 @@ with tab3:
     st.markdown("### 🔥 Inteligencia de Compras")
     st.info(
         "Busca una marca o producto para ver cuántos vendedores están compitiendo por él "
-        "en el catálogo de Mercado Libre y en qué rango de precios se mueven."
+        "en el catálogo de Mercado Libre y en qué rango de precios se mueven. **Tip**: incluye "
+        "la palabra 'perfume' en la búsqueda (ej. 'perfume Michael Kors Gorgeous 100ml mujer') "
+        "para resultados más precisos — sin ella, Mercado Libre a veces prioriza otras cosas de "
+        "la misma marca (carteras, relojes, etc.). Las filas con competencia real quedan primero; "
+        "las que dicen 'Sin competencia activa' son variantes de catálogo sin ningún vendedor "
+        "activo ahora mismo."
     )
     terminos_busqueda = st.text_area(
         "Marca(s) o producto(s) a investigar (uno por línea)",
