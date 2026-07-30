@@ -420,6 +420,30 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
         precio_max = max(precios) if precios else None
         precio_prom = (sum(precios) / len(precios)) if precios else None
 
+        # Mismo vendedor/precio más barato que usa el Repricer, para poder cotizar
+        # productos que todavía no existen en Bsale.
+        vendedor_mas_barato_display = "-"
+        item_mas_barato = None
+        for it in items:
+            if not it.get("price"):
+                continue
+            if item_mas_barato is None or float(it["price"]) < float(item_mas_barato["price"]):
+                item_mas_barato = it
+        if item_mas_barato:
+            seller_id_barato = item_mas_barato.get("seller_id")
+            if seller_id_barato:
+                try:
+                    r_seller = requests.get(
+                        f"https://api.mercadolibre.com/users/{seller_id_barato}",
+                        params={"attributes": "nickname"},
+                        headers=headers, timeout=15,
+                    )
+                    vendedor_mas_barato_display = r_seller.json().get("nickname") or "Desconocido"
+                except Exception:
+                    vendedor_mas_barato_display = "Desconocido"
+            if "cbt_item" in (item_mas_barato.get("tags") or []):
+                vendedor_mas_barato_display += " 🌎 (Internacional)"
+
         if n_vendedores == 0:
             rango = "Sin competencia activa"
         elif n_vendedores >= 8:
@@ -432,6 +456,7 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
             "🏆 Rango": rango,
             "Producto": nombre,
             "Precio Mínimo Mercado": f"${precio_min:,.0f}" if precio_min is not None else "-",
+            "Vendedor Más Barato": vendedor_mas_barato_display,
             "Precio Promedio Mercado": f"${precio_prom:,.0f}" if precio_prom is not None else "-",
             "Precio Máximo Mercado": f"${precio_max:,.0f}" if precio_max is not None else "-",
             "👥 Vendedores Compitiendo": n_vendedores,
