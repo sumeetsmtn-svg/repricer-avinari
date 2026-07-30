@@ -231,6 +231,21 @@ class MLSkuResolver:
         return data
 
 
+ESTADO_LABELS = {
+    "active": "Activa",
+    "paused": "Pausada",
+    "closed": "Cerrada",
+    "under_review": "En revisión",
+    "inactive": "Inactiva",
+    "payment_required": "Pago requerido",
+}
+
+def _formatear_estado_publicacion(status: Optional[str], sub_status) -> str:
+    etiqueta = ESTADO_LABELS.get(status, status or "Desconocido")
+    if isinstance(sub_status, list) and "out_of_stock" in sub_status:
+        etiqueta += " (sin stock)"
+    return etiqueta
+
 def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optional[dict]:
     item_id = resolver.resolver_sku(sku_bsale)
     if not item_id:
@@ -239,13 +254,14 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
     try:
         item_data = resolver._get(
             f"https://api.mercadolibre.com/items/{item_id}",
-            params={"attributes": "id,catalog_product_id,price,seller_id"},
+            params={"attributes": "id,catalog_product_id,price,seller_id,status,sub_status"},
         )
-    except Exception as e:
+    except Exception:
         return None
 
     catalog_product_id = item_data.get("catalog_product_id")
     precio_propio = item_data.get("price")
+    estado_publicacion = _formatear_estado_publicacion(item_data.get("status"), item_data.get("sub_status"))
 
     if not catalog_product_id:
         return {
@@ -253,106 +269,67 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
             "catalog_product_id": None,
             "en_catalogo": False,
             "precio_propio": precio_propio,
+            "estado_publicacion": estado_publicacion,
         }
+
+    # Se escanea en vivo la lista de competidores activos del catálogo y de ahí se
+    # sacan precio Y vendedor del más barato EN LA MISMA consulta. Antes se usaba el
+    # campo "buy_box_winner" de Mercado Libre para el precio (que puede venir con
+    # caché vieja de su lado) y por separado se resolvía el vendedor - si el precio
+    # cacheado ya no correspondía al vendedor más barato actual, mostraba un precio
+    # y un vendedor de momentos distintos, que no calzaban entre sí.
+    mejor_precio = None
+    mejor_item_id = None
+    mejor_seller_id = None
 
     try:
-        catalog_data = resolver._get(
-            f"https://api.mercadolibre.com/products/{catalog_product_id}"
-        )
-    except Exception as e:
-        return {
-            "item_id": item_id,
-            "catalog_product_id": catalog_product_id,
-            "en_catalogo": True,
-            "precio_propio": precio_propio,
-            "error_buy_box": str(e),
-        }
+        offset = 0
+        while offset < 500:
+            items_cat = resolver._get(
+                f"https://api.mercadolibre.com/products/{catalog_product_id}/items",
+                params={"status": "active", "limit": 50, "offset": offset}
+            )
 
-    buy_box_winner = catalog_data.get("buy_box_winner")
-    winner_id = None
-    precio_buy_box = None
-    ganando = False
+            lista_competidores = items_cat.get("results") or items_cat.get("items_with_buy_box") or []
 
-    if isinstance(buy_box_winner, dict):
-        winner_id = buy_box_winner.get("item_id")
-        precio_buy_box = buy_box_winner.get("price")
-        ganando = (winner_id == item_id)
+            if not lista_competidores:
+                break
 
-    winner_seller_id = None
+            for comp in lista_competidores:
+                comp_price = comp.get("price")
+                comp_item_id = comp.get("item_id") or comp.get("id")
 
-    # 🌞 PLAN B: Paginación profunda en el catálogo oficial
-    if not precio_buy_box:
-        try:
-            mejor_precio = float('inf')
-            mejor_item_id = None
-            mejor_seller_id = None
-            offset = 0
+                if comp_price and comp_item_id != item_id:
+                    comp_price_float = float(comp_price)
+                    if mejor_precio is None or comp_price_float < mejor_precio:
+                        mejor_precio = comp_price_float
+                        mejor_item_id = comp_item_id
+                        mejor_seller_id = comp.get("seller_id")
 
-            while offset < 500:
-                items_cat = resolver._get(
-                    f"https://api.mercadolibre.com/products/{catalog_product_id}/items",
-                    params={"status": "active", "limit": 50, "offset": offset}
-                )
+            offset += 50
+            if len(lista_competidores) < 50:
+                break
 
-                lista_competidores = items_cat.get("results") or items_cat.get("items_with_buy_box") or []
+    except Exception:
+        pass
 
-                if not lista_competidores:
-                    break
-
-                for comp in lista_competidores:
-                    comp_price = comp.get("price")
-                    comp_item_id = comp.get("item_id") or comp.get("id")
-
-                    if comp_price and comp_item_id != item_id:
-                        comp_price_float = float(comp_price)
-                        if comp_price_float < mejor_precio:
-                            mejor_precio = comp_price_float
-                            mejor_item_id = comp_item_id
-                            mejor_seller_id = comp.get("seller_id")
-
-                offset += 50
-                if len(lista_competidores) < 50:
-                    break
-
-            if mejor_precio != float('inf'):
-                precio_buy_box = mejor_precio
-                winner_id = mejor_item_id
-                winner_seller_id = mejor_seller_id
-
-        except Exception as e:
-            pass
+    ganando = (
+        precio_propio is not None
+        and mejor_precio is not None
+        and float(precio_propio) <= mejor_precio
+    )
 
     # Nota: /items/{id} de un item ajeno devuelve 403 (access_denied) con un token de
-    # app (client_credentials). Por eso el seller_id del rival se saca del catálogo
-    # público /products/{id}/items (arriba), nunca del item directamente.
+    # app (client_credentials). Por eso el seller_id del rival sale de la misma
+    # consulta al catálogo público de arriba, nunca del item directamente.
     rival_nombre = None
-    if winner_id and not ganando:
+    if mejor_seller_id and not ganando:
         try:
-            seller_id_rival = winner_seller_id
-            if not seller_id_rival:
-                offset = 0
-                while offset < 500 and not seller_id_rival:
-                    items_cat = resolver._get(
-                        f"https://api.mercadolibre.com/products/{catalog_product_id}/items",
-                        params={"status": "active", "limit": 50, "offset": offset}
-                    )
-                    lista_competidores = items_cat.get("results") or items_cat.get("items_with_buy_box") or []
-                    if not lista_competidores:
-                        break
-                    for comp in lista_competidores:
-                        if (comp.get("item_id") or comp.get("id")) == winner_id:
-                            seller_id_rival = comp.get("seller_id")
-                            break
-                    offset += 50
-                    if len(lista_competidores) < 50:
-                        break
-
-            if seller_id_rival:
-                seller_data = resolver._get(
-                    f"https://api.mercadolibre.com/users/{seller_id_rival}",
-                    params={"attributes": "nickname"},
-                )
-                rival_nombre = seller_data.get("nickname")
+            seller_data = resolver._get(
+                f"https://api.mercadolibre.com/users/{mejor_seller_id}",
+                params={"attributes": "nickname"},
+            )
+            rival_nombre = seller_data.get("nickname")
         except Exception:
             rival_nombre = None
 
@@ -361,8 +338,9 @@ def obtener_contexto_buy_box(resolver: MLSkuResolver, sku_bsale: str) -> Optiona
         "catalog_product_id": catalog_product_id,
         "en_catalogo": True,
         "precio_propio": precio_propio,
-        "precio_buy_box": precio_buy_box,
+        "precio_buy_box": mejor_precio,
         "ganando_buy_box": ganando,
-        "buy_box_winner_id": winner_id,
+        "buy_box_winner_id": mejor_item_id,
         "rival_nombre": rival_nombre,
+        "estado_publicacion": estado_publicacion,
     }
