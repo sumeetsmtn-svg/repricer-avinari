@@ -399,15 +399,21 @@ def _tokenizar(texto: str) -> set:
     # contra nombres que traen el tamaño con espacio ("100 Ml").
     return set(re.findall(r"[a-z]+|[0-9]+", texto.lower()))
 
-def _elegir_mejor_match(termino: str, candidatos: list[dict]) -> dict | None:
+def _elegir_candidatos_ordenados(termino: str, candidatos: list[dict]) -> list[tuple[float, dict]]:
+    # Similitud de Jaccard (coincidencias / union de palabras) en vez de solo contar
+    # coincidencias: así un título largo con relleno (ej. "...Set Volumen De La
+    # Unidad...") no le gana a la versión simple y correcta solo por compartir una
+    # palabra más de casualidad mientras arrastra bastante texto irrelevante.
     tokens_busqueda = _tokenizar(termino)
-    mejor, mejor_score = None, -1
+    puntuados = []
     for cand in candidatos:
-        score = len(tokens_busqueda & _tokenizar(cand.get("name") or ""))
-        if score > mejor_score:
-            mejor_score = score
-            mejor = cand
-    return mejor
+        tokens_cand = _tokenizar(cand.get("name") or "")
+        comunes = tokens_busqueda & tokens_cand
+        union = tokens_busqueda | tokens_cand
+        score = len(comunes) / len(union) if union else 0
+        puntuados.append((score, cand))
+    puntuados.sort(key=lambda x: x[0], reverse=True)
+    return puntuados
 
 # --- Cruce de productos de Mercado Libre contra el inventario de Bsale ---
 # Bsale busca por texto EXACTO (substring), no por palabras sueltas como Mercado
@@ -533,29 +539,47 @@ def analizar_inteligencia_mercado(termino: str) -> list[dict]:
         )
         r.raise_for_status()
         candidatos = r.json().get("results", [])
-        # Solo el resultado que mejor calza con lo escrito (marca, tamaño, género),
-        # no simplemente el que Mercado Libre puso primero en su propio orden.
-        mejor = _elegir_mejor_match(termino, candidatos)
-        catalogo = [mejor] if mejor else []
+        # Se ordenan por qué tan bien calzan con lo escrito (marca, tamaño, género),
+        # no simplemente por el orden que puso Mercado Libre.
+        candidatos_ordenados = _elegir_candidatos_ordenados(termino, candidatos)
     except Exception:
         return resultados
 
-    for prod in catalogo:
-        catalog_product_id = prod.get("id") or prod.get("catalog_product_id")
-        nombre = prod.get("name") or "-"
-        if not catalog_product_id:
-            continue
+    if not candidatos_ordenados:
+        return resultados
 
+    # Entre candidatos REALMENTE empatados (o casi) en similitud - ej. varias
+    # publicaciones distintas del mismo perfume - se prefiere el que SÍ tenga
+    # competencia activa, en vez de quedarse arbitrariamente con el primero que
+    # podría ser justo el que no tiene ningún vendedor. Ojo: esto NO debe bajar a
+    # candidatos con un puntaje bastante más bajo (serían un producto distinto,
+    # ej. "Pour Homme" en vez de "Wonderlust" solo porque ese sí tiene vendedores).
+    mejor_score = candidatos_ordenados[0][0]
+    margen_empate = 0.05
+    candidatos_empatados = [c for s, c in candidatos_ordenados if mejor_score - s <= margen_empate][:4]
+
+    prod, nombre, items = None, "-", []
+    for candidato in candidatos_empatados:
+        cpid = candidato.get("id") or candidato.get("catalog_product_id")
+        if not cpid:
+            continue
         try:
             r_items = requests.get(
-                f"https://api.mercadolibre.com/products/{catalog_product_id}/items",
+                f"https://api.mercadolibre.com/products/{cpid}/items",
                 params={"status": "active", "limit": 50},
                 headers=headers, timeout=15,
             )
-            items = r_items.json().get("results", [])
+            items_candidato = r_items.json().get("results", [])
         except Exception:
-            items = []
+            items_candidato = []
 
+        if prod is None:
+            prod, nombre, items = candidato, candidato.get("name") or "-", items_candidato
+        if items_candidato:
+            prod, nombre, items = candidato, candidato.get("name") or "-", items_candidato
+            break
+
+    if prod is not None:
         precios = [float(it["price"]) for it in items if it.get("price")]
         n_vendedores = len(items)
         precio_min = min(precios) if precios else None
